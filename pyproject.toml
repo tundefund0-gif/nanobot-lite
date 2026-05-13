@@ -11,50 +11,44 @@ authors = [
 ]
 
 dependencies = [
-    # Core
-    "pydantic>=2.12.0,<3.0.0",
-    "pydantic-settings>=2.12.0,<3.0.0",
-    "loguru>=0.7.3,<1.0.0",
-    "typer>=0.20.0,<1.0.0",
+    # Config & validation (pure Python)
+    "pydantic>=2.0.0,<3.0.0",
+    "pydantic-settings>=2.0.0,<3.0.0",
 
-    # Async networking
-    "websockets>=16.0,<17.0",
-    "websocket-client>=1.9.0,<2.0.0",
-    "httpx>=0.28.0,<1.0.0",
+    # Logging & CLI (pure Python)
+    "loguru>=0.7.0",
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "questionary>=1.10.0",
 
-    # Telegram
-    "python-telegram-bot>=22.6,<23.0",
+    # HTTP (pure Python stdlib — no native deps)
+    # Note: using urllib.request (stdlib) in provider code directly
 
-    # Cron
-    "croniter>=6.0.0,<7.0.0",
+    # Telegram bot (has pre-built ARM32 wheels)
+    "python-telegram-bot>=20.0.0",
 
-    # Search
-    "ddgs>=9.5.5,<10.0.0",
-    "readability-lxml>=0.8.4,<1.0.0",
+    # Search (pure Python)
+    "ddgs>=9.0.0",
 
-    # CLI
-    "prompt-toolkit>=3.0.50,<4.0.0",
-    "rich>=14.0.0,<15.0.0",
-    "questionary>=2.0.0,<3.0.0",
+    # HTML parsing (no lxml, no C deps)
+    "selectolax>=0.3.0",
 
-    # LLM Provider
-    "anthropic>=0.45.0,<1.0.0",
+    # Scheduling (pure Python)
+    "croniter>=1.0.0",
 
-    # Storage / config
-    "pyyaml>=6.0,<7.0.0",
-    "filelock>=3.25.2",
-    "jinja2>=3.1.0,<4.0.0",
-    "json-repair>=0.57.0,<1.0.0",
-    "chardet>=3.0.2,<6.0.0",
-
-    # Utils (pure Python)
-    "colorama>=0.4.6",
+    # Storage / config (pure Python)
+    "pyyaml>=6.0",
+    "filelock>=3.0.0",
+    "jinja2>=3.0.0",
+    "json-repair>=0.20.0",
+    "chardet>=5.0.0",
+    "colorama>=0.4.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.0.0,<10.0.0",
-    "pytest-asyncio>=1.3.0,<2.0.0",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",
 ]
 

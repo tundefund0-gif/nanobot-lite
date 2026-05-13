@@ -160,26 +160,40 @@ def web_search(query: str, num_results: int = 5) -> list[dict[str, str]]:
 
 
 def fetch_url(url: str, timeout: int = 10) -> str:
-    """Fetch content from a URL."""
-    import httpx
+    """Fetch content from a URL using stdlib urllib."""
+    import urllib.request
+    import urllib.error
     try:
-        response = httpx.get(url, timeout=timeout, follow_redirects=True)
-        response.raise_for_status()
-        return response.text
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        return f"HTTP Error: {e.code}"
     except Exception as e:
         return f"Error fetching URL: {e}"
 
 
 def get_page_content(url: str) -> str:
-    """Get readable content from a web page."""
+    """Get readable content from a web page using selectolax."""
     try:
-        import httpx
-        from readability import Document
+        from selectolax.parser import HTMLParser
+        content = fetch_url(url, timeout=15)
+        if content.startswith("Error") or content.startswith("HTTP"):
+            return content
 
-        response = httpx.get(url, timeout=10, follow_redirects=True)
-        response.raise_for_status()
-        doc = Document(response.text)
-        return doc.summary()
+        tree = HTMLParser(content)
+        # Remove script/style/nav elements
+        for tag in tree.css("script, style, nav, header, footer, aside"):
+            tag.decompose()
+
+        # Get text from body
+        body = tree.css_first("body")
+        if body:
+            text = body.text(separator="\n", strip=True)
+            # Clean up excessive newlines
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            return text[:15000]  # Cap at 15K chars
+        return content[:15000]
     except ImportError:
         return fetch_url(url)
     except Exception as e:

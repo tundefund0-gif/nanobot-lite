@@ -1,7 +1,10 @@
-"""Anthropic Claude LLM provider."""
+"""Anthropic Claude LLM provider — pure HTTP (no Rust, no jiter, no native deps)."""
 from __future__ import annotations
 
+import json
 import os
+import urllib.request
+import urllib.error
 from typing import Any, AsyncIterator
 
 from loguru import logger
@@ -14,9 +17,30 @@ from nanobot_lite.providers.base import (
     ToolCallRequest,
 )
 
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+
+
+def _chunk_json(chunks: list[bytes]) -> str:
+    """Reconstruct JSON from SSE data chunks."""
+    text = b"".join(chunks).decode("utf-8", errors="replace")
+
+    # Remove SSE format: "data: {...}\n\n"
+    lines = text.split("\n")
+    result_parts = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("data: "):
+            result_parts.append(stripped[6:])
+        elif stripped == "":
+            # Empty line — could be end of event
+            pass
+
+    return "".join(result_parts)
+
 
 class AnthropicProvider(LLMProvider):
-    """Anthropic Claude provider using the official SDK."""
+    """Anthropic Claude provider using raw HTTP — works everywhere, no native deps."""
 
     name = "anthropic"
     supports_streaming = True
@@ -25,18 +49,10 @@ class AnthropicProvider(LLMProvider):
     def __init__(self, api_key: str | None = None, model: str = "claude-sonnet-4-20250514"):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.model = model
-        self._client = None
 
     @property
     def requires_api_key(self) -> bool:
         return not bool(self.api_key)
-
-    def _get_client(self):
-        """Lazy-load the Anthropic client."""
-        if self._client is None:
-            from anthropic import AsyncAnthropic
-            self._client = AsyncAnthropic(api_key=self.api_key)
-        return self._client
 
     async def chat(
         self,
@@ -48,15 +64,23 @@ class AnthropicProvider(LLMProvider):
         stream: bool = False,
         **kwargs,
     ) -> LLMResponse:
-        """Send a chat request to Claude."""
-        client = self._get_client()
+        """Send a chat request to Claude via raw HTTP."""
         model = model or self.model
 
-        # Build message dicts
-        msg_dicts = [m.to_dict() for m in messages]
+        # Build message dicts for Anthropic format
+        msg_dicts = []
+        for m in messages:
+            d: dict[str, Any] = {"role": m.role, "content": m.content}
+            if m.tool_call_id:
+                d["tool_call_id"] = m.tool_call_id
+            if m.tool_name:
+                d["content"] = [
+                    {"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content}
+                ]
+            msg_dicts.append(d)
 
-        # Build request
-        request_kwargs: dict[str, Any] = {
+        # Build request body
+        body: dict[str, Any] = {
             "model": model,
             "messages": msg_dicts,
             "max_tokens": max_tokens,
@@ -64,47 +88,50 @@ class AnthropicProvider(LLMProvider):
         }
 
         if tools:
-            request_kwargs["tools"] = tools
+            body["tools"] = tools
 
-        # Filter out None values
-        request_kwargs = {k: v for k, v in request_kwargs.items() if v is not None}
+        body_json = json.dumps(body, ensure_ascii=False)
+
+        # Build request
+        req = urllib.request.Request(
+            ANTHROPIC_API_URL,
+            data=body_json.encode("utf-8"),
+            method="POST",
+        )
+        req.add_header("Content-Type", "application/json")
+        req.add_header("x-api-key", self.api_key)
+        req.add_header("anthropic-version", "2023-06-01")
+        req.add_header("accept", "application/json")
 
         try:
-            if stream:
-                # Streaming handled by chat_stream
-                response = await client.messages.create(**request_kwargs)
-            else:
-                response = await client.messages.create(**request_kwargs)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Anthropic API error {e.code}: {error_body}") from e
 
-            # Parse response
-            content_blocks = response.content
-            text_content = ""
-            tool_calls = []
+        # Parse response
+        content_blocks = data.get("content", [])
+        text_content = ""
+        tool_calls = []
 
-            for block in content_blocks:
-                if hasattr(block, "text") and block.text:
-                    text_content += block.text
-                if hasattr(block, "type") and block.type == "tool_use":
-                    tool_calls.append(ToolCallRequest(
-                        id=block.id,
-                        name=block.name,
-                        arguments=block.input,
-                    ))
+        for block in content_blocks:
+            if block.get("type") == "text":
+                text_content += block.get("text", "")
+            elif block.get("type") == "tool_use":
+                tool_calls.append(ToolCallRequest(
+                    id=block.get("id", ""),
+                    name=block.get("name", ""),
+                    arguments=block.get("input", {}),
+                ))
 
-            return LLMResponse(
-                content=text_content,
-                tool_calls=tool_calls,
-                usage={
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                },
-                model=response.model,
-                stop_reason=response.stop_reason,
-            )
-
-        except Exception as e:
-            logger.error(f"Anthropic API error: {e}")
-            raise
+        return LLMResponse(
+            content=text_content,
+            tool_calls=tool_calls,
+            usage=data.get("usage", {}),
+            model=data.get("model", model),
+            stop_reason=data.get("stop_reason"),
+        )
 
     async def chat_stream(
         self,
@@ -114,13 +141,20 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
     ) -> AsyncIterator[StreamDelta]:
-        """Stream a chat response from Claude."""
-        client = self._get_client()
+        """Stream a chat response from Claude via Server-Sent Events."""
         model = model or self.model
 
-        msg_dicts = [m.to_dict() for m in messages]
+        # Build message dicts
+        msg_dicts = []
+        for m in messages:
+            d: dict[str, Any] = {"role": m.role, "content": m.content}
+            if m.tool_call_id:
+                d["content"] = [
+                    {"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content}
+                ]
+            msg_dicts.append(d)
 
-        request_kwargs: dict[str, Any] = {
+        body: dict[str, Any] = {
             "model": model,
             "messages": msg_dicts,
             "max_tokens": max_tokens,
@@ -129,31 +163,65 @@ class AnthropicProvider(LLMProvider):
         }
 
         if tools:
-            request_kwargs["tools"] = tools
+            body["tools"] = tools
 
-        request_kwargs = {k: v for k, v in request_kwargs.items() if v is not None}
+        body_json = json.dumps(body, ensure_ascii=False)
+
+        req = urllib.request.Request(
+            ANTHROPIC_API_URL,
+            data=body_json.encode("utf-8"),
+            method="POST",
+        )
+        req.add_header("Content-Type", "application/json")
+        req.add_header("x-api-key", self.api_key)
+        req.add_header("anthropic-version", "2023-06-01")
+        req.add_header("accept", "text/event-stream")
 
         try:
-            async with client.messages.stream(**request_kwargs) as stream:
-                async for event in stream:
-                    if event.type == "content_block_delta":
-                        if hasattr(event.delta, "text") and event.delta.text:
-                            yield StreamDelta(content=event.delta.text)
-                        elif hasattr(event.delta, "name"):
-                            # Tool call start
-                            yield StreamDelta(
-                                tool_call=ToolCallRequest(
-                                    id=getattr(event.delta, "id", ""),
-                                    name=event.delta.name,
-                                    arguments={},
-                                )
-                            )
-                        elif hasattr(event.delta, "input_json"):
-                            # Tool input chunk
-                            pass  # accumulate in tool_delta buffer
-                    elif event.type == "message_delta":
-                        if event.delta.stop_reason:
-                            yield StreamDelta(done=True)
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                buffer: list[bytes] = []
+                for chunk in resp:
+                    buffer.append(chunk)
+
+                    # Try to parse complete SSE lines from buffer
+                    raw = b"".join(buffer)
+                    text = raw.decode("utf-8", errors="replace")
+                    lines = text.split("\n")
+
+                    for line in lines:
+                        stripped = stripped.lstrip("data: ").strip() if line.startswith("data:") else None
+                        if stripped is None:
+                            continue
+                        if not stripped or stripped == "[DONE]":
+                            continue
+
+                        try:
+                            event = json.loads(stripped)
+                        except json.JSONDecodeError:
+                            # Incomplete JSON, keep buffering
+                            continue
+
+                        etype = event.get("type", "")
+
+                        if etype == "content_block_delta":
+                            delta = event.get("delta", {})
+                            dtype = delta.get("type", "")
+
+                            if dtype == "text_delta":
+                                text_chunk = delta.get("text", "")
+                                if text_chunk:
+                                    yield StreamDelta(content=text_chunk)
+                                    buffer.clear()
+                                    break
+
+                            elif dtype == "input_json_delta":
+                                # Tool input chunk — accumulate
+                                pass
+
+                        elif etype == "message_delta":
+                            if event.get("delta", {}).get("stop_reason"):
+                                yield StreamDelta(done=True)
+                                return
 
         except Exception as e:
             logger.error(f"Anthropic streaming error: {e}")
