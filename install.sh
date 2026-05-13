@@ -3,7 +3,7 @@
 # Run this in Termux on your 32-bit Android phone!
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/nanobot-lite/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/tundefund0-gif/nanobot-lite/main/install.sh | bash
 #
 
 set -e
@@ -59,7 +59,7 @@ if [ -d "/root/nanobot-lite" ]; then
     pip install -e . -q 2>/dev/null || pip install . -q 2>/dev/null || true
 else
     pip install nanobot-lite -q 2>/dev/null || \
-    pip install git+https://github.com/YOUR_USERNAME/nanobot-lite.git -q 2>/dev/null || true
+    pip install git+https://github.com/tundefund0-gif/nanobot-lite.git -q 2>/dev/null || true
 fi
 
 # Create default config
