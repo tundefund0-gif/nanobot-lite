@@ -1,0 +1,81 @@
+[project]
+name = "nanobot-lite"
+version = "0.1.0"
+description = "Ultra-lightweight AI agent for Telegram — runs on Termux 32-bit Android"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Victor"},
+    {name = "nanobot-lite contributors"},
+]
+
+dependencies = [
+    # Core
+    "pydantic>=2.12.0,<3.0.0",
+    "pydantic-settings>=2.12.0,<3.0.0",
+    "loguru>=0.7.3,<1.0.0",
+    "typer>=0.20.0,<1.0.0",
+
+    # Async networking
+    "websockets>=16.0,<17.0",
+    "websocket-client>=1.9.0,<2.0.0",
+    "httpx>=0.28.0,<1.0.0",
+
+    # Telegram
+    "python-telegram-bot>=22.6,<23.0",
+
+    # Cron
+    "croniter>=6.0.0,<7.0.0",
+
+    # Search
+    "ddgs>=9.5.5,<10.0.0",
+    "readability-lxml>=0.8.4,<1.0.0",
+
+    # CLI
+    "prompt-toolkit>=3.0.50,<4.0.0",
+    "rich>=14.0.0,<15.0.0",
+    "questionary>=2.0.0,<3.0.0",
+
+    # LLM Provider
+    "anthropic>=0.45.0,<1.0.0",
+
+    # Storage / config
+    "pyyaml>=6.0,<7.0.0",
+    "filelock>=3.25.2",
+    "jinja2>=3.1.0,<4.0.0",
+    "json-repair>=0.57.0,<1.0.0",
+    "chardet>=3.0.2,<6.0.0",
+
+    # Utils (pure Python)
+    "colorama>=0.4.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.0,<10.0.0",
+    "pytest-asyncio>=1.3.0,<2.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+nanobot-lite = "nanobot_lite.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["nanobot_lite"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
