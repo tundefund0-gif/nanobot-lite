@@ -7,33 +7,25 @@ requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "Victor"},
-    {name = "nanobot-lite contributors"},
 ]
 
 dependencies = [
-    # Logging & CLI (pure Python)
+    # Logging
     "loguru>=0.7.0",
+
+    # CLI
     "typer>=0.9.0",
-    "rich>=13.0.0",
     "questionary>=1.10.0",
 
-    # Telegram bot (has pre-built ARM32 wheels)
+    # Telegram bot
     "python-telegram-bot>=20.0.0",
 
-    # Search (pure Python)
+    # Web
     "ddgs>=9.0.0",
-
-    # HTML parsing (pure Python, no C deps)
     "selectolax>=0.3.0",
 
-    # Scheduling (pure Python)
-    "croniter>=1.0.0",
-
-    # Storage / config (pure Python)
+    # Config (YAML)
     "pyyaml>=6.0",
-    "filelock>=3.0.0",
-    "jinja2>=3.0.0",
-    "colorama>=0.4.0",
 ]
 
 [project.optional-dependencies]
