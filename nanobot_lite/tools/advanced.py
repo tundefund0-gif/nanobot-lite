@@ -24,6 +24,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot_lite.tools.base import Tool, ToolResult
+from nanobot_lite.agent.self_diagnosis import run_diagnostics
 from nanobot_lite.utils.helpers import run_shell
 
 
@@ -511,6 +512,44 @@ class TextStatsTool(Tool):
         return ToolResult(content=out)
 
 
+# ─── Self-Diagnostic Tool ──────────────────────────────────────────────────────
+
+class DiagnosticsTool(Tool):
+    """Run agent self-diagnostics: tool health, circuit breakers, memory, workspace."""
+
+    name = "run_diagnostics"
+    description = (
+        "Run a self-diagnostic check on the agent's internal state. "
+        "Reports: tool health scores, circuit breaker status, memory usage, "
+        "system info, workspace status, and rollback backups. "
+        "Use 'all' or omit section for full report. "
+        "Available sections: health, circuits, memory, system, workspace, runtime, rollbacks."
+    )
+
+    def __init__(self):
+        super().__init__(
+            name=self.name,
+            description=self.description,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "section": {
+                        "type": "string",
+                        "description": "Diagnostic section to run: health, circuits, memory, system, workspace, runtime, rollbacks, all (default: all)",
+                    }
+                },
+            },
+        )
+
+    async def execute(self, args: dict[str, Any]) -> ToolResult:
+        section = args.get("section", "all")
+        try:
+            result = await run_diagnostics(section)
+            return ToolResult(content=result)
+        except Exception as e:
+            return ToolResult(content=f"Diagnostic error: {e}", success=False)
+
+
 # ─── Factory ─────────────────────────────────────────────────────────────────
 
 def create_advanced_tools() -> list[Tool]:
@@ -525,4 +564,5 @@ def create_advanced_tools() -> list[Tool]:
         HashFileTool(),
         CurrencyTool(),
         TextStatsTool(),
+        DiagnosticsTool(),
     ]

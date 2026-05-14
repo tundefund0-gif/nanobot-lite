@@ -1,7 +1,8 @@
-"""Advanced agent loop: multi-turn reasoning, self-healing, auto-debug, code improvement."""
+"""Advanced agent loop: multi-turn reasoning, deep self-healing, auto-debug, code improvement."""
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -9,7 +10,9 @@ from typing import Any
 
 from loguru import logger
 
+from nanobot_lite.agent.healer import get_healer, Severity, Strategy
 from nanobot_lite.agent.memory import ContextBuilder, Session, SessionStore
+from nanobot_lite.agent.self_diagnosis import run_diagnostics
 from nanobot_lite.bus.events import (
     InboundMessage,
     OutboundMessage,
@@ -23,7 +26,7 @@ from nanobot_lite.tools.base import ToolRegistry
 from nanobot_lite.utils.helpers import strip_think
 
 
-# ─── Rate limiter ───────────────────────────────────────────────────────────
+# ─── Rate limiter ──────────────────────────────────────────────────────────────
 
 class TokenBucket:
     def __init__(self, rate: float = 20.0, per: float = 60.0):
@@ -48,17 +51,17 @@ class TokenBucket:
 
 class RateLimiter:
     def __init__(self, msgs_per_min: int = 20, tokens_per_min: int = 100000, turns_per_hour: int = 50):
-        self.msg_limiter = TokenBucket(float(msgs_per_min), 60.0)
+        self.msg_limiter  = TokenBucket(float(msgs_per_min),   60.0)
         self.token_limiter = TokenBucket(float(tokens_per_min), 60.0)
-        self.turn_limiter = TokenBucket(float(turns_per_hour), 3600.0)
+        self.turn_limiter  = TokenBucket(float(turns_per_hour), 3600.0)
         self._user_buckets: dict[str, dict] = {}
 
     def _user(self, user_id: str) -> dict:
         if user_id not in self._user_buckets:
             self._user_buckets[user_id] = {
-                "msg": TokenBucket(20.0, 60.0),
+                "msg":   TokenBucket(20.0, 60.0),
                 "token": TokenBucket(100000.0, 60.0),
-                "turn": TokenBucket(50.0, 3600.0),
+                "turn":  TokenBucket(50.0, 3600.0),
             }
         return self._user_buckets[user_id]
 
@@ -80,72 +83,43 @@ class StreamConfig:
     chunk_size: int = 50
 
 
-# ─── Self-healing helpers ───────────────────────────────────────────────────
-
-class SelfHealer:
-    """Analyze errors and propose fixes."""
-
-    ERROR_PATTERNS = [
-        (r"SyntaxError", "Fix the Python syntax error shown in the traceback."),
-        (r"NameError", "Fix the undefined variable name — check spelling and imports."),
-        (r"TypeError", "Fix the type mismatch — check argument types and values."),
-        (r"ImportError|ModuleNotFoundError", "Fix the import — check the module name and installation."),
-        (r"FileNotFoundError|No such file", "Fix the file path — check if the file exists."),
-        (r"TimeoutExpired|timed out", "Increase timeout or simplify the operation."),
-        (r"Permission denied", "Fix permissions — check file/directory access rights."),
-        (r"Connection error|timeout|Network", "Check network connectivity and retry."),
-        (r"IndexError", "Fix index out of range — check list bounds."),
-        (r"KeyError", "Fix missing dictionary key — verify the key exists."),
-    ]
-
-    @classmethod
-    def diagnose(cls, error_text: str) -> str:
-        """Diagnose error and suggest fix."""
-        for pattern, suggestion in cls.ERROR_PATTERNS:
-            if re.search(pattern, error_text, re.IGNORECASE):
-                return f"🔧 *Diagnosis:* {suggestion}"
-        return f"🔧 *Diagnosis:* Review the error and fix the issue."
-
-    @classmethod
-    def generate_fix_prompt(cls, error_text: str, code: str) -> str:
-        """Generate a prompt for the LLM to fix the code."""
-        diagnosis = cls.diagnose(error_text)
-        return (
-            f"{diagnosis}\n\n"
-            f"Previous code had an error. Write corrected code:\n\n"
-            f"Error: {error_text[:500]}\n"
-            f"Code:\n{code[:1000]}"
-        )
-
-
-# ─── Tool result formatter ──────────────────────────────────────────────────
+# ─── Tool result formatter ─────────────────────────────────────────────────────
 
 class ToolResult:
     def __init__(self, content: str = "", success: bool = True, error: str = ""):
         self.content = content
         self.success = success
-        self.error = error
+        self.error   = error
 
 
-def _format_tool_result(tool_name: str, result: ToolResult) -> str:
-    if not result.success:
-        return f"❌ {tool_name}: {result.content}"
+def _format_tool_result(tool_name: str, result: ToolResult, heal_pass: int = 0) -> str:
+    prefix = "✅" if result.success else "❌"
+    if heal_pass > 0:
+        prefix = f"🔧 [{heal_pass}x] {prefix}"
     content = result.content
     if len(content) > 3000:
         content = content[:3000] + "\n\n... (truncated)"
-    return f"✅ {tool_name}:\n{content}"
+    return f"{prefix} {tool_name}:\n{content}"
 
 
-# ─── Advanced Agent Loop ───────────────────────────────────────────────────
+# ─── Advanced Agent Loop ───────────────────────────────────────────────────────
 
 class AgentLoop:
     """
-    Advanced agent with:
+    Advanced agent with deep self-healing capabilities:
+
     - Multi-turn reasoning (think step by step)
-    - Self-healing (auto-diagnose & fix errors)
-    - Auto-debug (analyze stacktraces)
-    - Code improvement (refactor and optimize)
-    - Auto-approve all tool executions (no confirmation)
+    - Deep self-healing (5-pass iterative healing per tool call)
+    - Circuit breaker per tool (skip after repeated failure)
+    - Auto-diagnosis (40+ structured error patterns)
+    - AST-based Python auto-fix
+    - Command fallback chains
+    - Path auto-discovery
+    - LLM-guided healing for complex errors
+    - Rollback on failure
+    - Tool health monitoring
+    - Self-diagnostic tool
+    - Auto-approve all tool executions
     - Context compression on overflow
     - Retry with exponential backoff
     - Multi-tool chaining
@@ -161,20 +135,23 @@ class AgentLoop:
         rate_limiter: RateLimiter | None = None,
         stream_config: StreamConfig | None = None,
     ):
-        self.bus = bus
-        self.provider = provider
-        self.config = config
-        self.tools = tool_registry
-        self.store = session_store
-        self.rate_limiter = rate_limiter or RateLimiter()
-        self.stream = stream_config or StreamConfig()
-        self._running = False
+        self.bus            = bus
+        self.provider       = provider
+        self.config         = config
+        self.tools          = tool_registry
+        self.store          = session_store
+        self.rate_limiter   = rate_limiter or RateLimiter()
+        self.stream         = stream_config or StreamConfig()
+        self._running       = False
+        self.healer         = get_healer()
         self._stats: dict[str, Any] = {
             "total_turns": 0,
             "total_tokens": 0,
             "tool_calls": 0,
             "heals": 0,
             "auto_fixes": 0,
+            "circuit_trips": 0,
+            "llm_heals": 0,
         }
 
     def stop(self) -> None:
@@ -182,11 +159,13 @@ class AgentLoop:
 
     @property
     def stats(self) -> dict[str, Any]:
-        return self._stats.copy()
+        s = self._stats.copy()
+        s["healer_health"] = self.healer.health_report()
+        return s
 
     async def run(self) -> None:
         self._running = True
-        logger.info("Advanced agent loop started")
+        logger.info("Advanced agent loop started (deep self-healing enabled)")
 
         while self._running:
             try:
@@ -206,9 +185,7 @@ class AgentLoop:
         ok, reason = self.rate_limiter.check(inbound.user_id or "anon")
         if not ok:
             await self.bus.outbound.put(OutboundMessage(
-                chat_id=inbound.chat_id,
-                text=reason,
-                reply_to=inbound.message_id,
+                chat_id=inbound.chat_id, text=reason, reply_to=inbound.message_id,
             ))
             return
 
@@ -219,8 +196,8 @@ class AgentLoop:
             chat_id=inbound.chat_id,
         )
 
-        # Build system prompt with auto-approve instructions
-        system_override = self._build_auto_system_prompt()
+        # Build system prompt with auto-approve + self-healing instructions
+        system_override = self._build_system_prompt()
         full_system = system_override + "\n\n" + self.config.agent.system_prompt
 
         # Compress if needed
@@ -232,21 +209,19 @@ class AgentLoop:
         # Add user message
         session.add_message(role="user", content=inbound.text)
 
-        # Send thinking indicator
+        # Send typing indicator
         await self.bus.outbound.put(OutboundMessage(
-            chat_id=inbound.chat_id,
-            action="typing",
+            chat_id=inbound.chat_id, action="typing",
         ))
 
-        # Multi-turn: keep going until no more tool calls
+        # Multi-turn loop: keep going until no more tool calls
         max_inner_turns = 10
         inner_turns = 0
-        tool_log = []
+        tool_log: list[tuple[str, ToolResult, int]] = []
 
         while inner_turns < max_inner_turns:
             inner_turns += 1
 
-            # Build context
             ctx = ContextBuilder.build(
                 session=session,
                 system_prompt=full_system,
@@ -254,7 +229,6 @@ class AgentLoop:
             )
             tools = self.tools.list_for_llm()
 
-            # Call LLM
             response = await self._call_llm_with_retry(ctx, tools)
 
             # Track tokens
@@ -269,15 +243,40 @@ class AgentLoop:
             # Add assistant response to session
             session.add_message(role="assistant", content=clean_content)
 
-            # No tool calls — we're done
+            # No tool calls — done
             if not response.tool_calls:
                 break
 
-            # Execute all tool calls in this turn
+            # Execute all tool calls with deep healing
             for tc in response.tool_calls:
                 self._stats["tool_calls"] += 1
-                result = await self._execute_tool_auto(tc, session, tool_log)
-                tool_log.append((tc.name, result))
+
+                # Check circuit breaker before executing
+                if not self.healer.should_heal(tc.name):
+                    self._stats["circuit_trips"] += 1
+                    circuit_msg = ToolResult(
+                        content=(
+                            f"⏭️ Circuit breaker OPEN for '{tc.name}' — "
+                            "too many recent failures. Skipping.\n"
+                            "Run /diagnose circuits to check status."
+                        ),
+                        success=False,
+                    )
+                    tool_log.append((tc.name, circuit_msg, 0))
+                    session.add_message(
+                        role="user",
+                        content=f"[TOOL: {tc.name}]\n{circuit_msg.content}",
+                        tool_call_id=tc.id,
+                        tool_name=tc.name,
+                    )
+                    continue
+
+                # Deep healing execute
+                result, heal_passes = await self._execute_with_healing(tc, session)
+                tool_log.append((tc.name, result, heal_passes))
+
+                if heal_passes > 0:
+                    self._stats["heals"] += 1
 
                 # Add tool result to session
                 session.add_message(
@@ -291,15 +290,15 @@ class AgentLoop:
         session.mark_updated()
         self.store.save(session)
 
-        # Build reply — combine assistant response with tool results
+        # Build reply
         reply_parts = []
         if clean_content and clean_content.strip():
             reply_parts.append(clean_content)
 
         if tool_log:
             tool_section = ""
-            for name, result in tool_log:
-                tool_section += _format_tool_result(name, result) + "\n"
+            for name, result, heal_pass in tool_log:
+                tool_section += _format_tool_result(name, result, heal_pass) + "\n"
             reply_parts.append(tool_section)
 
         reply_text = "\n\n".join(reply_parts)
@@ -308,55 +307,174 @@ class AgentLoop:
         elapsed = time.time() - start_time
         logger.info(
             f"Turn {self._stats['total_turns']} ({inner_turns} inner): "
-            f"{len(response.content)} chars, {self._stats['tool_calls']} tools, {elapsed:.1f}s"
+            f"{len(response.content)} chars, {self._stats['tool_calls']} tools, "
+            f"heals={self._stats['heals']}, {elapsed:.1f}s"
         )
 
         if reply_text:
             await self.bus.outbound.put(OutboundMessage(
-                chat_id=inbound.chat_id,
-                text=reply_text,
-                reply_to=inbound.message_id,
+                chat_id=inbound.chat_id, text=reply_text, reply_to=inbound.message_id,
             ))
 
-    async def _execute_tool_auto(self, tool_call, session: Session, tool_log: list) -> ToolResult:
-        """Execute a tool call with auto-approval (no confirmation needed)."""
+    async def _execute_with_healing(
+        self, tool_call, session
+    ) -> tuple[ToolResult, int]:
+        """
+        Execute a tool call with deep multi-pass healing.
+
+        Strategy per pass:
+          1. Try original args
+          2. AST auto-fix (Python errors)
+          3. Try fallback tool
+          4. Path recovery (FileNotFoundError)
+          5. LLM-guided fix
+        """
         tool_name = tool_call.name
         args = tool_call.arguments or {}
 
-        logger.info(f"Auto-executing tool: {tool_name} with args: {list(args.keys())}")
+        logger.info(f"[heal] executing {tool_name} with {list(args.keys())}")
 
-        await self.bus.inbound.put(ToolCallEvent(
-            tool_name=tool_name,
-            arguments=args,
-            user_id=session.user_id,
-            chat_id=session.chat_id,
-        ))
+        error_history: list[str] = []
+        current_args = dict(args)
+        current_code = args.get("code", "") if tool_name == "run_code" else ""
+        heal_passes = 0
 
-        try:
-            result = await self.tools.execute(tool_name, args)
+        for pass_num in range(1, self.healer.MAX_HEAL_PASSES + 1):
+            heal_passes = pass_num
+
+            # ── Execute ─────────────────────────────────────────────────────────
+            await self.bus.inbound.put(ToolCallEvent(
+                tool_name=tool_name,
+                arguments=current_args,
+                user_id=session.user_id,
+                chat_id=session.chat_id,
+            ))
+
+            try:
+                result = await self.tools.execute(tool_name, current_args)
+            except Exception as e:
+                logger.error(f"[heal] exception in {tool_name}: {e}")
+                plan = self.healer.diagnose(str(e))
+                self.healer.record_tool_result(tool_name, success=False, fatal=(plan.severity == Severity.FATAL))
+                result = ToolResult(
+                    content=f"Exception: {e}\n\n🔧 {plan.diagnosis}",
+                    success=False,
+                    error=str(e),
+                )
 
             await self.bus.inbound.put(ToolResultEvent(
                 tool_name=tool_name,
-                result=result.content if result.success else result.content,
+                result=result.content,
                 success=result.success,
             ))
 
-            # Self-healing: if tool failed, add suggestion
-            if not result.success:
-                diag = SelfHealer.diagnose(result.content)
-                result.content = f"{result.content}\n\n{diag}"
-                self._stats["heals"] += 1
+            if result.success:
+                self.healer.record_tool_result(tool_name, success=True, heal_passes=pass_num - 1)
+                return result, pass_num - 1
 
-            return ToolResult(content=result.content, success=result.success)
+            # Failure — record
+            plan = self.healer.diagnose(result.content)
+            error_history.append(result.content[:300])
 
-        except Exception as e:
-            logger.error(f"Tool {tool_name} error: {e}")
-            diag = SelfHealer.diagnose(str(e))
-            return ToolResult(
-                content=f"Error executing {tool_name}: {e}\n\n{diag}",
-                success=False,
-                error=str(e),
-            )
+            if pass_num < self.healer.MAX_HEAL_PASSES:
+                logger.info(f"[heal] pass {pass_num}/{self.healer.MAX_HEAL_PASSES} failed for {tool_name}, "
+                           f"strategy={plan.strategy.name}")
+
+            # ── Healing strategies ───────────────────────────────────────────────
+
+            fixed = False
+
+            # Strategy 1: AST auto-fix for Python
+            if (tool_name == "run_code" and
+                plan.strategy in (Strategy.PATCH_CODE, Strategy.RETRY_PARAMS) and
+                current_code):
+                fixed_code, fix_reason = self.healer.auto_fix_code(current_code, result.content)
+                if fixed_code and fixed_code != current_code:
+                    current_code = fixed_code
+                    current_args["code"] = fixed_code
+                    self._stats["auto_fixes"] += 1
+                    logger.info(f"[heal] AST fix applied: {fix_reason}")
+                    fixed = True
+
+            # Strategy 2: Fallback tool
+            if not fixed and plan.strategy == Strategy.FALLBACK_TOOL:
+                fallback = self.healer.get_fallback_tool(tool_name)
+                if fallback:
+                    logger.info(f"[heal] trying fallback {fallback} → {tool_name}")
+                    old_tool = tool_name
+                    tool_name = fallback
+                    # Adjust args for fallback
+                    if fallback == "python":
+                        current_args = {"code": args.get("command", ""), "language": "bash"}
+                    fixed = True
+
+            # Strategy 3: Alternative paths
+            if not fixed and plan.strategy == Strategy.ALT_PATH:
+                path_m = re.search(r"['\"]([^'\"]+)['\"]", result.content)
+                if path_m:
+                    guessed = path_m.group(1)
+                    similar = self.healer.path_finder.find_similar(
+                        guessed,
+                        session.user_id,
+                    )
+                    if similar:
+                        logger.info(f"[heal] path recovery: {similar}")
+                        # Inject alternative path
+                        if "path" in current_args:
+                            current_args["path"] = similar[0]
+                        fixed = True
+
+            # Strategy 4: LLM-guided healing (last resort before max passes)
+            if (not fixed and
+                (plan.escalate_to_llm or plan.severity >= Severity.HIGH) and
+                pass_num == self.healer.MAX_HEAL_PASSES - 1):
+                llm_prompt = self.healer.build_llm_fix_prompt(
+                    tool_name=tool_name,
+                    args=current_args,
+                    error_text=result.content,
+                    code=current_code,
+                    previous_attempts=error_history,
+                )
+                # Ask LLM for a fix
+                llm_response = await self._call_llm_with_retry(
+                    [LLMMessage(role="user", content=llm_prompt)],
+                    tools=None,
+                )
+                suggested_fix = strip_think(llm_response.content)
+                if suggested_fix and len(suggested_fix) < 2000:
+                    # Extract code from response if present
+                    code_m = re.search(r"```(?:python)?\n(.*?)```", suggested_fix, re.S)
+                    if code_m:
+                        current_code = code_m.group(1).strip()
+                        current_args["code"] = current_code
+                        self._stats["llm_heals"] += 1
+                        logger.info("[heal] LLM-guided fix injected")
+                        fixed = True
+
+            # Strategy 5: Retry with same params (for network/timeout)
+            if not fixed and plan.strategy == Strategy.RETRY:
+                logger.info(f"[heal] retry strategy for {tool_name}, waiting...")
+                await asyncio.sleep(min(2 ** pass_num, 10))
+                fixed = True
+
+            if not fixed:
+                # No more strategies — stop healing
+                break
+
+        # All healing passes exhausted
+        self.healer.record_tool_result(tool_name, success=False, heal_passes=heal_passes)
+        final_plan = self.healer.diagnose(error_history[-1] if error_history else "unknown")
+        return ToolResult(
+            content=(
+                f"{result.content}\n\n"
+                f"🔧 *Diagnosis:* {final_plan.diagnosis}\n"
+                f"📋 *Fix hints:*\n" +
+                "\n".join(f"  • {h}" for h in final_plan.fix_hints) +
+                f"\n_Healed {heal_passes} time(s) — max passes reached._"
+            ),
+            success=False,
+            error=result.error or "",
+        ), heal_passes
 
     async def _call_llm_with_retry(
         self,
@@ -384,38 +502,50 @@ class AgentLoop:
 
         return LLMResponse(content=f"❌ AI service unavailable after {retries} attempts: {last_error}")
 
-    def _build_auto_system_prompt(self) -> str:
-        """Build the auto-approve system instructions."""
-        return """You are Nanobot-Lite — an advanced autonomous AI agent.
+    def _build_system_prompt(self) -> str:
+        return """You are Nanobot-Lite — an advanced autonomous AI agent with deep self-healing.
 
 ## AUTO-APPROVE MODE
 You have FULL authority to execute any tool without asking for permission.
-Never ask "Should I run this?" or "Do you want me to?". Just do it.
-Every tool execution is automatically approved.
+Never ask "Should I run this?". Just do it.
 
 ## MULTI-TURN REASONING
 For complex tasks, think step by step. Use your tools to gather information,
 verify results, and iterate. Don't try to do everything in one response.
 
-## SELF-HEALING
-If a tool fails or returns an error:
-1. Read the error carefully
-2. Use SelfHealer.diagnose() to understand what went wrong
-3. Fix the issue and retry with corrected parameters
-4. If the first approach doesn't work, try a different approach
+## DEEP SELF-HEALING
+The agent has a multi-layer self-healing engine. When a tool fails:
+
+1. **Pass 1:** Retry with original parameters
+2. **Pass 2:** AST-based Python auto-fix (fixes NameError, IndexError, TypeError, etc.)
+3. **Pass 3:** Fallback tool chain (e.g., grep → rg → find → python)
+4. **Pass 4:** Path auto-discovery (finds similar files for FileNotFoundError)
+5. **Pass 5:** LLM-guided targeted fix
+
+The system tracks per-tool health scores and circuit breakers.
+If a tool fails repeatedly, the circuit breaker opens and the tool is skipped.
+
+## DIAGNOSTICS
+Use the `run_diagnostics` tool to check:
+- Tool health scores and failure rates
+- Circuit breaker status
+- Memory and system info
+- Rollback backups available
 
 ## CODE EXECUTION
 - Write clean, correct code. Test it before presenting.
-- If code has an error, analyze the error and write a fixed version.
-- Run code using the run_code tool for Python, JS, Ruby, PHP, Bash, Lua, C.
+- If code has an error, the self-healer will auto-fix and retry up to 5 times.
+- The Python fixer can handle: SyntaxError, NameError, IndexError, KeyError,
+  TypeError, AttributeError, ImportError, IndentationError, ZeroDivisionError,
+  ValueError, UnboundLocalError.
 - Use shell tool for system commands.
-- Use calculator, encode_decode, and other utility tools freely.
+- Use calculator, encode_decode, and utility tools freely.
 
 ## AUTO-DEBUG
 When you see a traceback or error:
-1. Identify the error type (SyntaxError, NameError, TypeError, etc.)
-2. Find the exact line and character position
-3. Fix the root cause, not just the symptoms
+1. Identify the error type and line number
+2. The system auto-diagnoses from 40+ structured error patterns
+3. Fix the root cause — not just the symptoms
 4. Verify the fix works
 
 ## CODE IMPROVEMENT
@@ -426,12 +556,17 @@ When improving code:
 - Add proper error handling
 
 ## TOOL PHILOSOPHY
-- Use tools proactively — don't just wait for the user to ask
+- Use tools proactively — don't wait for the user to ask
 - Chain multiple tools to accomplish complex goals
 - Verify tool results before moving to the next step
 - If something doesn't exist, create it. If something is wrong, fix it.
+- The system can rollback any file edit — be bold with edits!
 
-Be bold. Be fast. Be helpful."""
+## SPECIAL TOOLS
+- `run_diagnostics`: Full self-check of agent health, circuit breakers, memory
+- `rollback_file`: Restore any file from automatic backup
+
+Be bold. Be fast. Be helpful. The system has your back."""
 
     def _estimate_tokens(self, messages: list) -> int:
         total = 0

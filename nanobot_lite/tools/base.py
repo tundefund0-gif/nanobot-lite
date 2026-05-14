@@ -32,13 +32,21 @@ class Tool:
     - name: unique identifier
     - description: human-readable description for the LLM
     - parameters: JSON schema for the tool's parameters
+      (pass as input_schema= keyword for compat with existing tools)
     - handler: async function that executes the tool
     """
     name: str
     description: str
-    parameters: dict[str, Any]  # JSON Schema
-    handler: Callable[..., Any]
+    input_schema: dict[str, Any] | None = None  # alias — tools pass input_schema=
+    handler: Callable[..., Any] | None = None   # type: ignore
     enabled: bool = True
+
+    def __post_init__(self) -> None:
+        # Bridge: tools pass input_schema=, we store as parameters
+        # NOTE: this field is named 'parameters' in to_schema() output for OpenAI compat
+        self.parameters: dict[str, Any] = self.input_schema or {}
+        if self.handler is None and hasattr(self, "execute"):
+            self.handler = self.execute  # type: ignore
 
     def to_schema(self) -> dict[str, Any]:
         """Return the tool schema for the LLM."""
@@ -140,7 +148,7 @@ def register_tool(name: str, description: str, parameters: dict[str, Any]) -> Ca
         tool = Tool(
             name=name,
             description=description,
-            parameters=parameters,
+            input_schema=parameters,  # bridge: Tool stores as 'parameters' in __post_init__
             handler=func,
         )
         _registry.register(tool)

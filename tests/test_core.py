@@ -23,7 +23,7 @@ def test_tool_registry():
     tool = Tool(
         name="test",
         description="A test tool",
-        parameters={"type": "object", "properties": {}},
+        input_schema={"type": "object", "properties": {}},
         handler=dummy_handler,
     )
 
@@ -40,7 +40,7 @@ def test_message_bus():
     from nanobot_lite.bus.events import InboundMessage, Message
 
     bus = MessageBus()
-    assert bus.inbound_size() == 0
+    assert bus.inbound.qsize() == 0
 
     # Check that queues exist
     assert hasattr(bus, "inbound")
@@ -116,7 +116,7 @@ def test_tools_validate():
     tool = Tool(
         name="shell",
         description="Run a command",
-        parameters={
+        input_schema={
             "type": "object",
             "properties": {"cmd": {"type": "string"}},
             "required": ["cmd"],
