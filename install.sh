@@ -118,25 +118,18 @@ setup_venv() {
         success "Reusing existing venv"
     fi
 
-    # Bootstrap pip inside venv using ensurepip (no curl needed — Python stdlib)
+    # Use python -m pip directly (no separate pip binary needed inside venv)
+    # Works on Termux since system pip is available; ensurepip fallback
     PIP="$VENV_DIR/bin/pip"
     if [ ! -f "$PIP" ]; then
-        info "Bootstrapping pip inside venv (using ensurepip)..."
+        info "Setting up pip for venv..."
         "$VENV_DIR/bin/python" -m ensurepip --upgrade 2>/dev/null || {
-            # Fallback: use get-pip.py via wget instead of curl
-            if command -v wget &>/dev/null; then
-                wget -q https://bootstrap.pypa.io/get-pip.py -O /tmp/get-pip.py 2>/dev/null && \
-                    "$VENV_DIR/bin/python" /tmp/get-pip.py --quiet && rm -f /tmp/get-pip.py
-            else
-                info "Installing pip via pkg..."
-                pkg install -y python-pip 2>/dev/null || true
-            fi
+            info "ensurepip unavailable — system pip will work directly"
         }
-        [ -f "$PIP" ] && success "pip bootstrapped inside venv" || warn "pip bootstrap skipped — using venv python directly"
     fi
 
     # Upgrade pip in venv
-    "$PIP" install --quiet --upgrade pip setuptools wheel
+    "$NANOBOT_PYTHON" -m pip install --quiet --upgrade pip setuptools wheel
     success "venv pip ready"
 
     export VENV_DIR
@@ -181,12 +174,12 @@ install_deps() {
     DEPS="httpx loguru python-telegram-bot pyyaml aiohttp"
 
     info "Installing core deps: $DEPS"
-    "$NANOBOT_PIP" install --quiet $DEPS
+    "$NANOBOT_PYTHON" -m pip install --quiet $DEPS
 
     # Platform-specific
     if [ "$PLATFORM" = "termux" ]; then
         info "Installing Termux-specific deps..."
-        "$NANOBOT_PIP" install --quiet termux-api 2>/dev/null || true
+        "$NANOBOT_PYTHON" -m pip install --quiet termux-api 2>/dev/null || true
     fi
 
     success "Dependencies installed"
@@ -198,10 +191,10 @@ install_package() {
 
     info "Installing nanobot-lite in editable mode..."
     cd "$DEST"
-    "$NANOBOT_PIP" install --quiet -e .
+    "$NANOBOT_PYTHON" -m pip install --quiet -e .
 
     # Install loguru if missing (critical — used everywhere)
-    "$NANOBOT_PIP" install --quiet loguru
+    "$NANOBOT_PYTHON" -m pip install --quiet loguru
 
     success "nanobot-lite installed"
 }
