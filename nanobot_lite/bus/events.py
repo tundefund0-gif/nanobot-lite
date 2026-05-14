@@ -1,5 +1,6 @@
 """Event types for the message bus."""
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -42,11 +43,7 @@ class ToolCall:
     arguments: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "arguments": self.arguments,
-        }
+        return {"id": self.id, "name": self.name, "arguments": self.arguments}
 
 
 @dataclass
@@ -58,56 +55,51 @@ class ToolResult:
     success: bool = True
     error: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "tool_call_id": self.tool_call_id,
-            "content": self.content,
-            "is_error": self.error is not None,
-        }
-
 
 @dataclass
 class InboundMessage:
     """An inbound message from a chat channel."""
-    session_key: str
+    platform: str
     user_id: str
     chat_id: str
-    message: Message
-    message_id: int = 0
-    reply_to: int | None = None
-    attachments: list[str] = field(default_factory=list)
+    text: str
+    message_id: str = "0"
+    username: str = ""
+    first_name: str = ""
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
-    def __str__(self) -> str:
-        return f"Inbound[{self.session_key}] {self.message.role.value}: {self.message.content[:50]}"
+    @property
+    def session_key(self) -> str:
+        return f"{self.platform}:{self.user_id}:{self.chat_id}"
 
 
 @dataclass
 class OutboundMessage:
     """An outbound message to a chat channel."""
-    session_key: str
     chat_id: str
-    content: str
-    reply_to: int | None = None
-    is_streaming: bool = False
+    text: str = ""
+    reply_to: str | None = None
+    action: str | None = None  # "typing", "upload_photo", etc.
     parse_mode: str = "markdown"
-    message_id: int | None = None  # for edits
-    attachments: list[str] = field(default_factory=list)
+    message_id: int | None = None
 
-    def __str__(self) -> str:
-        return f"Outbound[{self.session_key}]: {self.content[:50]}"
+    @property
+    def session_key(self) -> str:
+        return self.chat_id
 
 
 @dataclass
 class ToolCallEvent:
-    """A tool call event (used for streaming/progress)."""
-    session_key: str
-    tool_call: ToolCall
-    partial_arguments: str = ""  # for streaming
+    """A tool call event."""
+    tool_name: str
+    arguments: dict[str, Any]
+    user_id: str = ""
+    chat_id: str = ""
 
 
 @dataclass
 class ToolResultEvent:
     """A tool result event."""
-    session_key: str
-    result: ToolResult
+    tool_name: str
+    result: str
+    success: bool = True

@@ -1,217 +1,252 @@
-# 🤖 Nanobot-Lite
+# 🤖 Nanobot-Lite v0.2.0
 
-> **Ultra-lightweight AI agent for Telegram — built for Termux on 32-bit Android**
+> **Advanced AI agent for Telegram — runs natively on Termux 32-bit Android**
 
-A stripped-down, Termux-compatible rebuild of [HKUDS/nanobot](https://github.com/HKUDS/nanobot). No WebUI, no extra channels, no native extensions — just a lean Telegram bot with Claude brain + tools.
+Built from scratch for constrained hardware. Pure Python, zero native deps.
 
-## ⚡ What's Inside
+---
 
-```
-✅ Telegram bot          — python-telegram-bot
-✅ Claude (Anthropic)    — Official SDK
-✅ Web search            — DuckDuckGo
-✅ Shell execution       — with safety filters
-✅ File operations       — read/write/edit/list
-✅ Session memory        — file-based, persistent
-✅ ~15 dependencies      — all pure Python or have ARM32 wheels
-✅ Python 3.11+          — runs in Termux on 32-bit Android
-```
+## ✨ What's New in v0.2.0
 
-## 📱 Termux Setup (32-bit Android)
+- **12 slash commands** — `/help`, `/search`, `/shell`, `/stats`, `/sessions`, `/clear`, `/export`, `/uptime`, `/sysinfo`, `/id`, `/menu`, `/ping`, `/version`, `/config`
+- **9 advanced tools** — Calculator, System Info, Date/Time, URL Fetcher, Encode/Decode, UUID Generator, Currency Converter, Text Stats, File Hash
+- **Rate limiting** — Token bucket per user (20 msgs/min, 50 turns/hr)
+- **Context compression** — Automatically compacts long conversations
+- **Retry with backoff** — LLM calls retry 3x with exponential backoff
+- **Multi-tool chaining** — Execute multiple tools per turn
+- **Inline keyboard menus** — Rich interactive UI
+- **User allowlisting** — Restrict access by Telegram user ID
+- **Interactive setup wizard** — 6-step guided config with API validation
+- **Personality builder** — Customize agent behavior and expertise
+- **Session export** — Export chat history to text file
+- **Health check** — `nanobot-lite health` verifies all systems
 
-### 1. Install Termux
+---
 
-Download from [F-Droid](https://f-droid.org/) (recommended) or GitHub. **Do NOT use Google Play** — it's outdated.
-
-### 2. Update Termux
-
-```bash
-termux-setup-storage  # Allow storage access
-pkg update && pkg upgrade -y
-```
-
-### 3. Install Python
+## 🚀 Quick Start
 
 ```bash
-pkg install python -y
-python --version  # Should be 3.11+
+# Install (one line)
+pip install git+https://github.com/tundefund0-gif/nanobot-lite.git
+
+# Setup (interactive wizard)
+nanobot-lite setup
+
+# Run
+nanobot-lite run
 ```
 
-### 4. Install Nanobot-Lite
+---
 
-```bash
-# Navigate to where you want nanobot-lite
-cd ~/nanobot_workspace
-pip install nanobot-lite
-```
+## ⚙️ Manual Setup
 
-Or install from this repo:
-```bash
-pip install git+https://github.com/YOUR_USERNAME/nanobot-lite.git
-```
+### 1. Get your credentials
 
-### 5. Get Your API Keys
+**Telegram Bot Token:**
+1. Open Telegram → search **@BotFather**
+2. Send `/newbot` → follow prompts → copy **bot token**
 
-**Anthropic (Claude brain):**
-1. Go to [console.anthropic.com](https://console.anthropic.com/)
-2. Create an API key
-3. Copy it
+**Anthropic API Key:**
+1. Go to **https://console.anthropic.com/**
+2. Create account → copy **API key** (`sk-ant-...`)
 
-**Telegram Bot:**
-1. Open Telegram and message [@BotFather](https://t.me/BotFather)
-2. Send `/newbot`
-3. Follow the prompts, get your bot token
+### 2. Configure
 
-### 6. Configure
-
-Run the setup wizard:
 ```bash
 nanobot-lite setup
 ```
 
-Or manually create `~/.nanobot_lite/config.yaml`:
+Or manually edit `~/.nanobot_lite/config.yaml`:
 
 ```yaml
 telegram:
   enabled: true
-  bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
-  allowed_users: []  # Leave empty to allow everyone, or add Telegram user IDs
+  bot_token: "YOUR_BOT_TOKEN"
+  allowed_users: []
+  admin_user_id: ""
+  reply_to_incoming: true
 
 agent:
   name: "Nanobot-Lite"
   model: "claude-sonnet-4-20250514"
   max_tokens: 4096
   temperature: 0.7
+  max_turns: 50
   system_prompt: |
-    You are Nanobot-Lite, a helpful AI assistant.
-    You have access to tools for web search, shell commands, and file operations.
-    Be concise, helpful, and safe.
+    You are Nanobot-Lite, a helpful AI assistant with access to web search,
+    shell commands, and file operations. Be concise, helpful, and safe.
+
+memory:
+  session_dir: ~/.nanobot_lite/sessions
+  max_session_messages: 200
 
 tools:
   workspace_dir: ~/nanobot_workspace
   shell_enabled: true
-  shell_timeout: 30
-  restrict_to_workspace: true
+  limits:
+    shell_timeout: 30
+    restrict_to_workspace: true
+
+log:
+  level: INFO
 ```
 
-### 7. Set API Key & Run
+### 3. Set API key and run
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
+export ANTHROPIC_API_KEY="sk-ant-YOUR-KEY"
 nanobot-lite run
 ```
 
-**That's it!** Your Telegram bot is live. Message it from your phone.
+---
 
-### 8. Keep It Running (Optional)
+## 📟 Commands
 
-Use `tmux` or `nohup` to keep it running in the background:
-
-```bash
-# Install tmux
-pkg install tmux -y
-
-# Run in background
-tmux new-session -d -s nanobot 'export ANTHROPIC_API_KEY="sk-ant-..." && nanobot-lite run'
-
-# Attach to check on it
-tmux attach -t nanobot
-```
-
-Or use Termux's built-in background feature (long-press home button).
-
-## 🛠️ Commands
-
+### Agent Commands
 | Command | Description |
-|---|---|
-| `/start` | Start the bot |
-| `/help` | Show help |
-| `/reset` | Reset your conversation |
-| `/stats` | Show session statistics |
+|---------|-------------|
+| `/search <query>` | Web search via DuckDuckGo |
+| `/shell <cmd>` | Execute shell command directly |
+| `/sysinfo` | System info (CPU, RAM, disk) |
 
-## 🔧 CLI Reference
+### Session Management
+| Command | Description |
+|---------|-------------|
+| `/stats` | Bot statistics and top users |
+| `/sessions` | List all active sessions |
+| `/clear` | Clear your conversation |
+| `/export` | Export chat history to file |
 
+### Utility
+| Command | Description |
+|---------|-------------|
+| `/ping` | Health check with latency |
+| `/uptime` | Bot uptime |
+| `/id` | Your Telegram user ID |
+| `/menu` | Show interactive menu |
+| `/version` | Version info |
+| `/config` | Show current config |
+| `/help` | All commands |
+
+### Just type anything — the AI responds!
+
+---
+
+## 🛠️ Advanced Commands
+
+### Health check
 ```bash
-nanobot-lite run              # Start the bot
-nanobot-lite setup            # Interactive setup wizard
-nanobot-lite session --list   # List all sessions
-nanobot-lite session --stats <key>  # Show session stats
-nanobot-lite session --delete <key>  # Delete a session
-nanobot-lite shell "ls -la"   # Quick shell command
-nanobot-lite version           # Show version
+nanobot-lite health
 ```
+
+### Personality builder
+```bash
+nanobot-lite persona
+```
+
+### Session management
+```bash
+nanobot-lite session --list          # List sessions
+nanobot-lite session --stats <key>   # Session stats
+nanobot-lite session --delete <key>   # Delete session
+nanobot-lite session --export <key>   # Export to file
+nanobot-lite session --clear-all     # Clear all sessions
+```
+
+### Direct shell
+```bash
+nanobot-lite shell "ls -la"
+nanobot-lite shell "ps aux" --timeout 60
+```
+
+---
+
+## 🔧 Tools Available
+
+| Tool | Description |
+|------|-------------|
+| `shell` | Execute shell commands (sandboxed) |
+| `read_file` | Read file contents |
+| `write_file` | Write files |
+| `edit_file` | Edit files with patch |
+| `list_dir` | List directory contents |
+| `web_search` | DuckDuckGo search |
+| `calculator` | Math expressions |
+| `system_info` | CPU, RAM, disk, OS |
+| `datetime_info` | Current time/date |
+| `fetch_url` | Get page content |
+| `encode_decode` | Base64, URL, hex, MD5, SHA256 |
+| `generate_id` | UUID, short ID, timestamp |
+| `hash_file` | File hashing |
+| `currency_convert` | Currency conversion |
+| `text_stats` | Word/char/line count |
+
+---
+
+## 📦 Dependencies (5 packages, pure Python)
+
+```
+loguru          — Logging
+typer           — CLI
+questionary     — Interactive prompts
+python-telegram-bot — Telegram bot
+pyyaml          — Config
+```
+
+---
+
+## 📁 Project Structure
+
+```
+nanobot-lite/
+├── pyproject.toml
+├── README.md
+├── install.sh
+└── nanobot_lite/
+    ├── __init__.py          — Version 0.2.0
+    ├── __main__.py
+    ├── cli.py               — Advanced CLI (setup, run, persona, health, shell)
+    ├── config/schema.py     — Dataclass-based config (no pydantic)
+    ├── bus/
+    │   ├── events.py        — Event types
+    │   └── queue.py         — Message bus
+    ├── agent/
+    │   ├── loop.py          — Agent loop (retry, rate limiting, tool chaining)
+    │   └── memory.py        — Session persistence
+    ├── providers/
+    │   ├── base.py          — LLM provider interface
+    │   └── anthropic_provider.py  — Raw HTTP (no SDK)
+    ├── channels/
+    │   └── telegram.py      — Telegram bot (slash commands, menus)
+    ├── tools/
+    │   ├── base.py          — Tool registry
+    │   ├── shell.py         — Shell tool
+    │   ├── filesystem.py    — File tools
+    │   ├── web.py           — Search tool
+    │   └── advanced.py      — 9 advanced tools
+    └── utils/
+        └── helpers.py       — Web search (stdlib), helpers
+```
+
+---
 
 ## 🔒 Security
 
-- **Workspace restriction** — File operations are confined to `workspace_dir`
-- **Blocked commands** — Dangerous shell commands are blocked (fork bombs, `rm -rf /`, etc.)
-- **User allowlist** — Restrict bot access to specific Telegram users
-- **No code execution** — Tools are sandboxed
+- Workspace restriction (files stay in `~/nanobot_workspace`)
+- Command blocklist (fork bombs, `rm -rf /`, etc.)
+- No inline code execution
+- User allowlisting by Telegram ID
+- Rate limiting per user
 
-## 📁 File Structure
+---
 
-```
-~/.nanobot_lite/
-├── config.yaml       # Your configuration
-├── sessions/         # Chat history (one JSON file per session)
-└── nanobot.log       # Log file
-```
+## 📱 Requirements
 
-## 🔄 Dependencies (All ARM32-compatible)
+- Python 3.11+
+- Termux on Android (32-bit ARM compatible)
+- Telegram bot token
+- Anthropic API key
 
-All dependencies have pre-built wheels for ARM32 (Android/Termux):
+---
 
-- `pydantic` — Config validation
-- `anthropic` — Claude SDK
-- `python-telegram-bot` — Telegram API
-- `httpx` — HTTP client
-- `websockets` — WebSocket support
-- `loguru` — Logging
-- `typer` — CLI
-- `croniter` — Cron scheduling
-- `ddgs` — DuckDuckGo search
-- `readability-lxml` — Web page extraction
-- `prompt-toolkit` — CLI input
-- `rich` — Terminal formatting
-- `jinja2` — Templating
-- `pyyaml` — YAML config
-- `json-repair` — JSON fixing
-- `chardet` — Character detection
-- `colorama` — Terminal colors
-
-## 🚫 What's NOT Included (vs nanobot)
-
-Removed for Termux compatibility:
-
-- ❌ React WebUI (requires Node.js)
-- ❌ API server (requires aiohttp + more deps)
-- ❌ Discord, Slack, Matrix, WhatsApp channels
-- ❌ MCP server support
-- ❌ Skills system
-- ❌ Many LLM providers (Anthropic only)
-- ❌ tiktoken (no ARM32 wheel — using heuristic token estimation)
-- ❌ boto3, pypdf, openpyxl (no ARM32 wheels)
-
-## 🐛 Troubleshooting
-
-**"Module not found" errors:**
-```bash
-pip install --force-reinstall nanobot-lite
-```
-
-**Bot not responding:**
-- Check your bot token is correct
-- Make sure you've started a chat with your bot
-- Check logs: `tail -f ~/.nanobot_lite/nanobot.log`
-
-**API errors:**
-- Verify your `ANTHROPIC_API_KEY` is set and valid
-- Check your Anthropic API credits
-
-**Termux background dying:**
-- Install Termux Boot: `pkg install termux-boot`
-- Configure to start on boot
-
-## 📄 License
-
-MIT
+**Built with ❤️ for Termux on Android**

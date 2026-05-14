@@ -1,291 +1,622 @@
-"""Telegram channel implementation."""
+"""Advanced Telegram channel with slash commands, streaming, and rich UI."""
 from __future__ import annotations
 
 import asyncio
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ChatType, ParseMode
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    ConversationHandler,
+)
 
 from nanobot_lite.bus.events import InboundMessage, Message, OutboundMessage
 from nanobot_lite.bus.queue import MessageBus
 from nanobot_lite.config.schema import Config
 
 
-# Maximum message length for Telegram
-MAX_MESSAGE_LENGTH = 4000
+# ─── Slash command states ─────────────────────────────────────────────────────
 
+(
+    STATE_WAITING_CMD,
+    STATE_SHELL_CMD,
+    STATE_SEARCH_QUERY,
+    STATE_CONFIG_EDIT,
+) = range(4)
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def _extract_command(text: str) -> tuple[str | None, str | None]:
+    """Extract /command and arguments from text."""
+    text = text.strip()
+    if not text.startswith("/"):
+        return None, None
+    parts = text.split(maxsplit=1)
+    cmd = parts[0].lower()
+    args = parts[1] if len(parts) > 1 else None
+    return cmd, args
+
+
+def _format_time(seconds: float) -> str:
+    """Format duration in human-readable form."""
+    if seconds < 1:
+        return f"{seconds*1000:.0f}ms"
+    elif seconds < 60:
+        return f"{seconds:.1f}s"
+    elif seconds < 3600:
+        return f"{seconds/60:.1f}m"
+    return f"{seconds/3600:.1f}h"
+
+
+# ─── Conversation handler keyboard ────────────────────────────────────────────
+
+def _main_menu_keyboard() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton("📊 Stats", callback_data="cmd_stats"),
+         InlineKeyboardButton("💾 Sessions", callback_data="cmd_sessions")],
+        [InlineKeyboardButton("🔧 Config", callback_data="cmd_config"),
+         InlineKeyboardButton("🗑️ Clear Chat", callback_data="cmd_clear")],
+        [InlineKeyboardButton("📤 Export", callback_data="cmd_export"),
+         InlineKeyboardButton("⏱️ Uptime", callback_data="cmd_uptime")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+# ─── Telegram Channel ─────────────────────────────────────────────────────────
 
 class TelegramChannel:
-    """Telegram bot channel using python-telegram-bot."""
-
-    name = "telegram"
-    display_name = "Telegram"
+    """
+    Advanced Telegram channel with:
+    - Slash commands (/help, /search, /shell, /session, /stats, etc.)
+    - Streaming typing indicators
+    - Inline keyboard menus
+    - Rich formatted responses
+    - User allowlisting
+    - Message editing support
+    """
 
     def __init__(self, config: Config, bus: MessageBus):
         self.config = config
-        self.telegram_config = config.telegram
         self.bus = bus
-        self._app = None
-        self._running = False
-        self.logger = logger.bind(channel=self.name)
+        self._app: Application | None = None
+        self._start_time = datetime.now()
+        self._user_stats: dict[str, dict] = {}
+        self._streaming_tasks: dict[int, asyncio.Task] = {}
 
     async def start(self) -> None:
         """Start the Telegram bot."""
-        if not self.telegram_config.enabled:
-            self.logger.info("Telegram channel disabled")
+        token = self.config.telegram.bot_token
+        if not token:
+            logger.error("No Telegram bot token configured!")
             return
 
-        if not self.telegram_config.bot_token:
-            self.logger.warning("Telegram bot token not set — channel disabled")
-            return
+        logger.info("Starting Telegram bot...")
+        self._app = Application.builder().token(token).build()
 
-        self.logger.info("Starting Telegram channel...")
+        # Register command handlers
+        self._register_commands()
 
-        try:
-            from telegram import BotCommand
-            from telegram.ext import (
-                Application,
-                CommandHandler,
-                MessageHandler,
-                filters,
-                CallbackContext,
-            )
-        except ImportError:
-            self.logger.error("python-telegram-bot not installed. Run: pip install python-telegram-bot")
-            return
+        # Register message handler (non-command messages)
+        self._app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            self._handle_text_message,
+        ))
 
-        # Build the application
-        app = Application.builder().token(self.telegram_config.bot_token).build()
+        # Register callback query handler (inline buttons)
+        self._app.add_handler(MessageHandler(
+            filters.UpdateType.CALLBACK_QUERY,
+            self._handle_callback,
+        ))
 
-        # Register handlers
-        app.add_handler(CommandHandler("start", self._on_start))
-        app.add_handler(CommandHandler("help", self._on_help))
-        app.add_handler(CommandHandler("reset", self._on_reset))
-        app.add_handler(CommandHandler("stats", self._on_stats))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message))
-        app.add_handler(MessageHandler(filters.PHOTO, self._on_photo))
-        app.add_handler(MessageHandler(filters.VOICE, self._on_voice))
-
-        # Set bot commands
-        await app.initialize()
-        await app.bot.set_my_commands([
-            BotCommand("start", "Start the bot"),
-            BotCommand("help", "Show help"),
-            BotCommand("reset", "Reset conversation"),
-            BotCommand("stats", "Show session stats"),
-        ])
-
-        self._app = app
-        self._running = True
-
-        self.logger.info("Telegram channel started")
-        await app.run_polling(drop_pending_updates=True)
+        await self._app.initialize()
+        await self._app.start()
+        await self._app.updater.start_polling(drop_pending_updates=True)
+        logger.info("Telegram bot started!")
 
     async def stop(self) -> None:
-        """Stop the Telegram bot."""
-        self._running = False
+        """Stop the Telegram bot gracefully."""
         if self._app:
+            await self._app.updater.stop()
             await self._app.stop()
-            self.logger.info("Telegram channel stopped")
+            await self._app.shutdown()
+            logger.info("Telegram bot stopped")
 
-    # --- Command Handlers ---
-
-    async def _on_start(self, update: Any, context: CallbackContext) -> None:
-        await update.message.reply_text(
-            "👋 *Nanobot-Lite* is online!\n\n"
-            "I'm an AI assistant that can help you with tasks using tools like "
-            "web search, shell commands, and file operations.\n\n"
-            "Just send me a message and I'll get to work!",
-            parse_mode="markdown",
-        )
-
-    async def _on_help(self, update: Any, context: CallbackContext) -> None:
-        await update.message.reply_text(
-            "*Available Commands:*\n\n"
-            "/reset — Reset your conversation\n"
-            "/stats — Show session statistics\n"
-            "\n"
-            "_Just send any message to chat with me!_",
-            parse_mode="markdown",
-        )
-
-    async def _on_reset(self, update: Any, context: CallbackContext) -> None:
-        """Reset the conversation by deleting the session."""
-        from nanobot_lite.agent.memory import SessionStore
-
-        session_key = self._get_session_key(update.effective_user.id, update.effective_chat.id)
-        store = SessionStore(self.config.memory.session_dir)
-
-        if store.delete(session_key):
-            await update.message.reply_text("✅ Conversation reset! Starting fresh.")
-        else:
-            await update.message.reply_text("Started a new conversation.")
-
-    async def _on_stats(self, update: Any, context: CallbackContext) -> None:
-        """Show session statistics."""
-        from nanobot_lite.agent.memory import SessionStore
-
-        session_key = self._get_session_key(update.effective_user.id, update.effective_chat.id)
-        store = SessionStore(self.config.memory.session_dir)
-        stats = store.get_stats(session_key)
-
-        if not stats:
-            await update.message.reply_text("No conversation yet. Say hello!")
+    def _register_commands(self) -> None:
+        """Register all slash commands."""
+        app = self._app
+        if not app:
             return
 
-        await update.message.reply_text(
-            f"*Session Stats:*\n\n"
-            f"Messages: {stats['message_count']}\n"
-            f"Turns: {stats['turn_count']}\n"
-            f"Est. tokens: {stats['estimated_tokens']}\n"
-            f"Last active: {stats['updated_at']}",
-            parse_mode="markdown",
-        )
+        handlers = [
+            CommandHandler("help", self._cmd_help),
+            CommandHandler("start", self._cmd_start),
+            CommandHandler("stats", self._cmd_stats),
+            CommandHandler("sessions", self._cmd_sessions),
+            CommandHandler("clear", self._cmd_clear),
+            CommandHandler("export", self._cmd_export),
+            CommandHandler("uptime", self._cmd_uptime),
+            CommandHandler("shell", self._cmd_shell),
+            CommandHandler("search", self._cmd_search),
+            CommandHandler("sysinfo", self._cmd_sysinfo),
+            CommandHandler("id", self._cmd_id),
+            CommandHandler("menu", self._cmd_menu),
+            CommandHandler("ping", self._cmd_ping),
+            CommandHandler("version", self._cmd_version),
+            CommandHandler("config", self._cmd_config),
+        ]
 
-    async def _on_message(self, update: Any, context: CallbackContext) -> None:
-        """Handle a text message."""
-        # Check user access
-        if not self._check_access(update):
+        for h in handlers:
+            app.add_handler(h)
+
+    # ─── Message routing ─────────────────────────────────────────────────────
+
+    async def _handle_text_message(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle non-command text messages — route to agent."""
+        if not update.message:
             return
 
-        text = update.message.text or ""
-        if not text.strip():
+        user_id = str(update.message.from_user.id)
+        chat_id = update.message.chat_id
+
+        # Check allowlist
+        if self.config.telegram.allowed_users and user_id not in self.config.telegram.allowed_users:
+            await update.message.reply_text(
+                "⛔ Access denied. You are not on the allowlist.",
+                reply_to_message_id=update.message.message_id,
+            )
             return
 
-        session_key = self._get_session_key(update.effective_user.id, update.effective_chat.id)
+        # Track stats
+        self._track_user(user_id)
 
+        text = update.message.text.strip()
+
+        # Check for inline commands
+        cmd, args = _extract_command(text)
+        if cmd:
+            return  # Already handled by CommandHandler
+
+        # Send to agent
         inbound = InboundMessage(
-            session_key=session_key,
-            user_id=str(update.effective_user.id),
-            chat_id=str(update.effective_chat.id),
-            message=Message(role="user", content=text),
-            message_id=update.message.message_id,
-            reply_to=update.message.reply_to_message_id if self.telegram_config.reply_to_incoming else None,
+            platform="telegram",
+            user_id=user_id,
+            chat_id=str(chat_id),
+            text=text,
+            message_id=str(update.message.message_id),
+            username=update.message.from_user.username or "",
+            first_name=update.message.from_user.first_name or "",
         )
+        await self.bus.inbound.put(inbound)
 
-        await self.bus.publish_inbound(inbound)
+    async def _handle_callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle inline button callbacks."""
+        query = update.callback_query
+        if not query:
+            return
+        await query.answer()
 
-        # Send "processing" indicator
-        await update.message.reply_text("🤔 processing...", quote=False)
+        data = query.data or ""
+        user_id = str(query.from_user.id)
 
-    async def _on_photo(self, update: Any, context: CallbackContext) -> None:
-        """Handle a photo — forward as a text description."""
-        if not self._check_access(update):
+        if data == "cmd_stats":
+            await self._cmd_stats(update, ctx)
+        elif data == "cmd_sessions":
+            await self._cmd_sessions(update, ctx)
+        elif data == "cmd_clear":
+            await self._cmd_clear(update, ctx)
+        elif data == "cmd_export":
+            await self._cmd_export(update, ctx)
+        elif data == "cmd_uptime":
+            await self._cmd_uptime(update, ctx)
+        elif data == "cmd_menu":
+            await self._cmd_menu(update, ctx)
+        elif data == "cmd_config":
+            await self._cmd_config(update, ctx)
+
+    def _track_user(self, user_id: str) -> None:
+        """Track user message stats."""
+        if user_id not in self._user_stats:
+            self._user_stats[user_id] = {"messages": 0, "first_seen": datetime.now().isoformat()}
+        self._user_stats[user_id]["messages"] += 1
+
+    # ─── Slash Commands ──────────────────────────────────────────────────────
+
+    async def _cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /start command."""
+        if not update.message:
             return
 
-        # For now, just acknowledge
+        user = update.message.from_user
+        welcome = f"👋 Hey {user.first_name}! I'm *Nanobot-Lite* — your AI assistant on your phone.\n\n"
+        welcome += "Type a message and I'll think, search the web, run commands, and more.\n\n"
+        welcome += "_I'm an advanced agent with access to multiple tools._\n\n"
+        welcome += "Use /help to see all commands."
+
         await update.message.reply_text(
-            "📷 Image received. For now, images are described but not processed. "
-            "I'll let you know when image analysis is ready!",
+            welcome,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_main_menu_keyboard(),
         )
 
-    async def _on_voice(self, update: Any, context: CallbackContext) -> None:
-        """Handle a voice message — try to transcribe."""
-        if not self._check_access(update):
+    async def _cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /help command — show all commands."""
+        if not update.message:
+            return
+
+        help_text = """
+🤖 *Nanobot-Lite Commands*
+
+*Agent Commands*
+`/search <query>` — Web search
+`/shell <cmd>` — Run shell command
+`/sysinfo` — System information
+
+*Session Management*
+`/stats` — Bot statistics
+`/sessions` — Active sessions
+`/clear` — Clear conversation
+`/export` — Export chat history
+
+*Utility*
+`/ping` — Health check
+`/uptime` — Bot uptime
+`/id` — Your user ID
+`/menu` — Show menu
+`/version` — Version info
+`/config` — View config
+
+*Just type* any message and I'll respond!
+"""
+        await update.message.reply_text(
+            help_text.strip(),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_main_menu_keyboard(),
+        )
+
+    async def _cmd_stats(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /stats command."""
+        if not update.message:
+            return
+
+        # Try to get agent stats from bus
+        agent_stats = {}
+        try:
+            # Stats are tracked in the agent loop
+            pass
+        except:
+            pass
+
+        uptime = (datetime.now() - self._start_time).total_seconds()
+
+        stats_text = f"""
+📊 *Nanobot-Lite Statistics*
+
+🕐 Uptime: {_format_time(uptime)}
+👥 Users tracked: {len(self._user_stats)}
+💬 Messages processed: {sum(u['messages'] for u in self._user_stats.values())}
+
+*Top Users:*
+"""
+        sorted_users = sorted(self._user_stats.items(), key=lambda x: x[1]["messages"], reverse=True)
+        for uid, data in sorted_users[:3]:
+            stats_text += f"\n  User `{uid[-6:]}`: {data['messages']} msgs"
+
+        await update.message.reply_text(
+            stats_text.strip(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    async def _cmd_sessions(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /sessions command."""
+        if not update.message:
+            return
+
+        from nanobot_lite.agent.memory import SessionStore
+        store = SessionStore(self.config.memory.session_dir)
+        sessions = store.list_sessions()
+
+        if not sessions:
+            await update.message.reply_text("No active sessions.")
+            return
+
+        text = f"📁 *Sessions ({len(sessions)}):*\n\n"
+        for s in sessions[:20]:
+            text += f"  ▸ `{s}`\n"
+
+        if len(sessions) > 20:
+            text += f"\n  _...and {len(sessions)-20} more_"
+
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+    async def _cmd_clear(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /clear command — clear user session."""
+        if not update.message:
+            return
+
+        user_id = str(update.message.from_user.id)
+        from nanobot_lite.agent.memory import SessionStore
+        store = SessionStore(self.config.memory.session_dir)
+
+        # Find and delete this user's session
+        sessions = store.list_sessions()
+        for s in sessions:
+            if user_id in s:
+                store.delete(s)
+                await update.message.reply_text(
+                    "🗑️ Session cleared! Starting fresh.",
+                    reply_markup=_main_menu_keyboard(),
+                )
+                return
+
+        await update.message.reply_text(
+            "✅ Already fresh — no session to clear.",
+            reply_markup=_main_menu_keyboard(),
+        )
+
+    async def _cmd_export(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /export command."""
+        if not update.message:
+            return
+
+        user_id = str(update.message.from_user.id)
+        from nanobot_lite.agent.memory import SessionStore
+        store = SessionStore(self.config.memory.session_dir)
+        sessions = store.list_sessions()
+
+        # Find user session
+        for s in sessions:
+            if user_id in s:
+                session = store.load(s)
+                if session:
+                    # Build export text
+                    export = f"📤 Chat export — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                    for msg in session.messages:
+                        role = msg.get("role", "?")
+                        content = msg.get("content", "")
+                        if isinstance(content, list):
+                            content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+                        prefix = "👤" if role == "user" else "🤖"
+                        export += f"{prefix} *{role.upper()}*: {content[:300]}\n\n"
+
+                    await update.message.reply_text(
+                        export[:4000],
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                    return
+
+        await update.message.reply_text("No session to export.")
+
+    async def _cmd_uptime(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /uptime command."""
+        if not update.message:
+            return
+
+        uptime = datetime.now() - self._start_time
+        total_s = uptime.total_seconds()
+        days = int(total_s // 86400)
+        hours = int((total_s % 86400) // 3600)
+        mins = int((total_s % 3600) // 60)
+
+        await update.message.reply_text(
+            f"⏱️ Bot uptime: {days}d {hours}h {mins}m\nStarted: {self._start_time.strftime('%Y-%m-%d %H:%M:%S')}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    async def _cmd_shell(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /shell command — direct shell execution."""
+        if not update.message:
+            return
+
+        args = ctx.args
+        if not args:
+            await update.message.reply_text(
+                "Usage: /shell <command>\nExample: /shell ls -la ~/",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        cmd = " ".join(args)
+        code, out, err = self._run_shell(cmd, timeout=30)
+
+        if code == 0:
+            output = out[:3000] or "(no output)"
+        else:
+            output = f"❌ Exit code: {code}\n{err or out[:3000]}"
+
+        await update.message.reply_text(
+            f"```bash\n$ {cmd}\n```\n{output}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+
+    async def _cmd_search(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /search command — direct web search."""
+        if not update.message:
+            return
+
+        if not ctx.args:
+            await update.message.reply_text("Usage: /search <query>")
+            return
+
+        query = " ".join(ctx.args)
+        from nanobot_lite.utils.helpers import web_search
+
+        await update.message.reply_text("🔍 Searching...")
+        results = web_search(query, num_results=5)
+
+        if results and "error" not in results[0]:
+            text = f"🔍 *Results for:* `{query}`\n\n"
+            for i, r in enumerate(results, 1):
+                text += f"{i}. [{r['title']}]({r['url']})\n"
+                if r.get("snippet"):
+                    text += f"   _{r['snippet'][:150]}_...\n\n"
+            await update.message.reply_text(
+                text.strip(),
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+        else:
+            await update.message.reply_text(f"❌ No results or error: {results[0].get('error', 'Unknown')}")
+
+    async def _cmd_sysinfo(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /sysinfo command."""
+        if not update.message:
+            return
+
+        import platform, os, subprocess
+
+        info = "🖥️ *System Info*\n\n"
+        info += f"OS: {platform.system()} {platform.release()}\n"
+        info += f"Machine: {platform.machine()}\n"
+        info += f"Python: {platform.python_version()}\n"
+
+        cpu_count = os.cpu_count() or 1
+        info += f"CPU cores: {cpu_count}\n"
+
+        try:
+            with open("/proc/meminfo") as f:
+                meminfo = f.read()
+            total_kb = int(re.search(r"MemTotal:\s+(\d+)", meminfo).group(1))
+            avail_kb = int(re.search(r"MemAvailable:\s+(\d+)", meminfo).group(1))
+            used_pct = (total_kb - avail_kb) / total_kb * 100
+            info += f"Memory: {used_pct:.0f}% used ({avail_kb//1024}MB available)"
+        except:
+            pass
+
+        await update.message.reply_text(info, parse_mode=ParseMode.MARKDOWN)
+
+    async def _cmd_id(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /id command — show user and chat IDs."""
+        if not update.message:
+            return
+
+        user = update.message.from_user
+        chat = update.message.chat
+
+        text = f"👤 *Your Info*\n\n"
+        text += f"User ID: `{user.id}`\n"
+        if user.username:
+            text += f"Username: @{user.username}\n"
+        text += f"First name: {user.first_name}\n"
+        text += f"\n💬 *Chat Info*\n\n"
+        text += f"Chat ID: `{chat.id}`\n"
+        text += f"Chat type: {chat.type}"
+
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+    async def _cmd_menu(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /menu command."""
+        if not update.message:
             return
 
         await update.message.reply_text(
-            "🎤 Voice message received. Transcription isn't set up yet — "
-            "please send text messages for now.",
+            "📋 *Main Menu*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_main_menu_keyboard(),
         )
 
-    def _check_access(self, update: Any) -> bool:
-        """Check if the user is allowed to use the bot."""
-        user_id = str(update.effective_user.id)
+    async def _cmd_ping(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /ping command — health check."""
+        if not update.message:
+            return
 
-        # Admin always has access
-        if self.telegram_config.admin_user_id and user_id == self.telegram_config.admin_user_id:
-            return True
+        start = datetime.now()
+        await update.message.reply_text("🏓 Pong!")
+        latency = (datetime.now() - start).total_seconds() * 1000
+        await update.message.edit_message_text(
+            text=f"🏓 Pong! Latency: {latency:.0f}ms",
+        )
 
-        # If allowed_users is set, check against it
-        if self.telegram_config.allowed_users:
-            if user_id not in self.telegram_config.allowed_users:
-                self.logger.warning(f"Unauthorized user: {user_id}")
-                update.message.reply_text("⛔ You're not authorized to use this bot.")
-                return False
+    async def _cmd_version(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /version command."""
+        if not update.message:
+            return
 
-        return True
+        import sys, nanobot_lite
+        await update.message.reply_text(
+            f"📦 *Nanobot-Lite*\n\n"
+            f"Version: `{nanobot_lite.__version__}`\n"
+            f"Python: `{sys.version.split()[0]}`\n"
+            f"Platform: `{sys.platform}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
-    def _get_session_key(self, user_id: int, chat_id: int) -> str:
-        """Generate a session key for a user/chat pair."""
-        return f"telegram:{chat_id}:{user_id}"
+    async def _cmd_config(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /config command — show current config."""
+        if not update.message:
+            return
+
+        text = "⚙️ *Current Config*\n\n"
+        text += f"Agent name: `{self.config.agent.name}`\n"
+        text += f"Model: `{self.config.agent.model}`\n"
+        text += f"Max tokens: `{self.config.agent.max_tokens}`\n"
+        text += f"Temp: `{self.config.agent.temperature}`\n"
+        text += f"Max turns: `{self.config.agent.max_turns}`\n"
+        text += f"Workspace: `{self.config.tools.workspace_dir}`\n"
+        text += f"Shell enabled: `{self.config.tools.shell_enabled}`"
+
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+    def _run_shell(self, cmd: str, timeout: int = 30) -> tuple[int, str, str]:
+        """Run shell command synchronously."""
+        try:
+            result = subprocess.run(
+                ["/bin/sh", "-c", cmd],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            return result.returncode, result.stdout, result.stderr
+        except subprocess.TimeoutExpired:
+            return -1, "", f"Timed out after {timeout}s"
+        except Exception as e:
+            return -1, "", str(e)
 
 
-# --- Outbound handler ---
+# ─── Outbound handler ───────────────────────────────────────────────────────
+
 async def handle_outbound(bus: MessageBus, config: Config) -> None:
-    """
-    Consume outbound messages from the bus and send them to Telegram.
-    Runs as a separate async task.
-    """
-    if not config.telegram.enabled or not config.telegram.bot_token:
+    """Process outbound messages from the agent and send to Telegram."""
+    from telegram import Bot
+
+    bot_token = config.telegram.bot_token
+    if not bot_token:
         return
 
-    try:
-        from telegram import Bot
-    except ImportError:
-        return
-
-    bot = Bot(token=config.telegram.bot_token)
+    bot = Bot(token=bot_token)
 
     while True:
         try:
-            outbound = await bus.consume_outbound()
-            chat_id = int(outbound.chat_id)
+            outbound = await bus.outbound.get()
 
-            content = outbound.content
-
-            # Split long messages
-            parts = _split_message(content)
-
-            for i, part in enumerate(parts):
-                reply_to = outbound.reply_to if i == 0 else None
-                try:
-                    if outbound.reply_to and outbound.message_id:
-                        # Edit existing message
-                        await bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=outbound.message_id,
-                            text=part,
-                            parse_mode="HTML" if outbound.parse_mode == "html" else None,
-                        )
-                    else:
-                        # Send new message
+            if isinstance(outbound, OutboundMessage):
+                if outbound.action == "typing":
+                    try:
+                        await bot.send_chat_action(chat_id=outbound.chat_id, action="typing")
+                    except:
+                        pass
+                elif outbound.text:
+                    try:
                         await bot.send_message(
-                            chat_id=chat_id,
-                            text=part,
-                            reply_to_message_id=reply_to,
-                            parse_mode="Markdown",
+                            chat_id=outbound.chat_id,
+                            text=outbound.text[:4096],
+                            parse_mode=ParseMode.MARKDOWN,
+                            reply_to_message_id=int(outbound.reply_to) if outbound.reply_to else None,
                         )
-                except Exception as e:
-                    logger.error(f"Failed to send message: {e}")
+                    except Exception as e:
+                        logger.error(f"Failed to send message: {e}")
 
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.exception(f"Outbound handler error: {e}")
+            logger.error(f"Outbound handler error: {e}")
             await asyncio.sleep(1)
-
-
-def _split_message(text: str, max_len: int = MAX_MESSAGE_LENGTH) -> list[str]:
-    """Split a long message into chunks."""
-    if len(text) <= max_len:
-        return [text]
-
-    parts = []
-    lines = text.split("\n")
-    current = ""
-
-    for line in lines:
-        if len(current) + len(line) + 1 > max_len:
-            if current:
-                parts.append(current.strip())
-            current = line
-        else:
-            current = (current + "\n" + line) if current else line
-
-    if current:
-        parts.append(current.strip())
-
-    return parts

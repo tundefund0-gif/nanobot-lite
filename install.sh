@@ -9,7 +9,7 @@
 set -e
 
 echo "==============================================="
-echo "  🤖 Nanobot-Lite Installer for Termux"
+echo "  🤖 NANOBOT-LITE v0.2.0 INSTALLER"
 echo "==============================================="
 echo ""
 
