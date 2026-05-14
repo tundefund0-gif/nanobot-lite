@@ -1,9 +1,9 @@
 """Nanobot-Lite: Advanced AI agent for Telegram on Termux."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __logo__ = r"""
     ╔══════════════════════════════════════╗
-    ║   🤖 NANOBOT-LITE v0.3.0             ║
+    ║   🤖 NANOBOT-LITE v0.4.0           ║
     ║   Advanced AI Agent for Telegram      ║
     ║   Built for Termux on Android         ║
     ║   Deep Self-Healing Engine ✨         ║

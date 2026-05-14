@@ -101,7 +101,10 @@ class TelegramConfig:
 @dataclass
 class AgentConfig:
     name: str = "Nanobot-Lite"
-    model: str = "claude-sonnet-4-20250514"
+    provider: str = "opencode-zen"  # "opencode-zen" | "anthropic"
+    model: str = "minimax-m2.5-free"
+    base_url: str = ""  # e.g. "https://opencode.ai/zen" (opencode-zen default auto-detected)
+    api_key: str = ""   # can be stored in config or read from env
     max_tokens: int = 4096
     temperature: float = 0.7
     max_turns: int = 50
@@ -128,7 +131,10 @@ class AgentConfig:
 
         return cls(
             name=name,
-            model=d.get("model", "claude-sonnet-4-20250514"),
+            provider=d.get("provider", "opencode-zen"),
+            model=d.get("model", "minimax-m2.5-free"),
+            base_url=d.get("base_url", ""),
+            api_key=d.get("api_key", ""),
             max_tokens=d.get("max_tokens", 4096),
             temperature=d.get("temperature", 0.7),
             max_turns=d.get("max_turns", 50),
@@ -194,7 +200,10 @@ class Config:
         return {
             "agent": {
                 "name": self.agent.name,
+                "provider": self.agent.provider,
                 "model": self.agent.model,
+                "base_url": self.agent.base_url,
+                "api_key": self.agent.api_key,
                 "max_tokens": self.agent.max_tokens,
                 "temperature": self.agent.temperature,
                 "max_turns": self.agent.max_turns,
@@ -268,7 +277,10 @@ telegram:
 
 agent:
   name: "Nanobot-Lite"
-  model: "claude-sonnet-4-20250514"
+  provider: "opencode-zen"  # "opencode-zen" | "anthropic"
+  model: "minimax-m2.5-free"
+  base_url: "https://opencode.ai/zen"
+  api_key: ""  # Or set OPENCODE_API_KEY env var
   max_tokens: 4096
   temperature: 0.7
   max_turns: 50

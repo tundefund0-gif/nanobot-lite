@@ -32,7 +32,7 @@ from nanobot_lite.config.schema import (
     save_config,
     ensure_default_config,
 )
-from nanobot_lite.providers import AnthropicProvider
+from nanobot_lite.providers import AnthropicProvider, create_provider
 from nanobot_lite.tools.base import ToolRegistry
 from nanobot_lite.tools.shell import create_shell_tool
 from nanobot_lite.tools.filesystem import create_filesystem_tools
@@ -97,12 +97,20 @@ def run(
 
     logger.info(f"Nanobot-Lite v{__version__} starting...")
 
-    # API key check
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        logger.error("ANTHROPIC_API_KEY not set!")
-        logger.info("Run: export ANTHROPIC_API_KEY=sk-ant-...")
-        return
+    # API key resolution: config.api_key > env var
+    provider_type = config.agent.provider
+    if provider_type == "opencode-zen":
+        api_key = config.agent.api_key or os.environ.get("OPENCODE_API_KEY", "")
+        if not api_key:
+            logger.error("API key not set!")
+            logger.info("Set api_key in config or export OPENCODE_API_KEY=...")
+            return
+    else:
+        api_key = config.agent.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            logger.error("ANTHROPIC_API_KEY not set!")
+            logger.info("Set api_key in config or export ANTHROPIC_API_KEY=sk-ant-...")
+            return
 
     if not config.telegram.bot_token:
         logger.error("Telegram bot token not set!")
@@ -111,7 +119,9 @@ def run(
 
     print(__logo__)
     print(f"  🤖 Agent: {config.agent.name}")
-    print(f"  🧠 Model: {config.agent.model}")
+    print(f"  🧠 Provider: {config.agent.provider} | Model: {config.agent.model}")
+    if config.agent.base_url:
+        print(f"  🌐 Base URL: {config.agent.base_url}")
     print(f"  📁 Workspace: {config.tools.workspace_dir}")
     print(f"  🔒 Shell: {'enabled' if config.tools.shell_enabled else 'disabled'}")
     print()
@@ -120,8 +130,13 @@ def run(
         # Create message bus
         bus = MessageBus()
 
-        # Create LLM provider
-        provider = AnthropicProvider(api_key=api_key, model=config.agent.model)
+        # Create LLM provider using factory
+        provider = create_provider(
+            provider_type=config.agent.provider,
+            api_key=api_key,
+            model=config.agent.model,
+            base_url=config.agent.base_url or None,
+        )
 
         # Create tool registry with all tools
         registry = ToolRegistry()
@@ -218,41 +233,79 @@ def setup(
             typer.echo("Setup cancelled.")
             return
 
-    # ── Step 1: API Key ─────────────────────────────────────────────────────
-    typer.echo("\n🔑 Step 1/6 — Anthropic API Key")
-    typer.echo("  Get yours at: https://console.anthropic.com/")
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        api_key = questionary.text(
-            "Enter your Anthropic API key (sk-ant-...):",
-            style=questionary.Style([("password", "bold")]),
-        ).ask()
-    if not api_key:
-        typer.echo("❌ API key required. Run 'nanobot-lite setup' again.")
-        return
+    # ── Step 1: Provider & API Key ────────────────────────────────────────────
+    typer.echo("\n🔑 Step 1/7 — LLM Provider")
+    provider_type = questionary.select(
+        "Which LLM provider?",
+        choices=["opencode-zen", "anthropic"],
+        default="opencode-zen",
+    ).ask()
 
-    # Validate API key
-    typer.echo("  Validating API key...")
-    try:
-        import urllib.request, json
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=json.dumps({"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"ping"}],"max_tokens":10}).encode(),
-            method="POST",
-        )
-        req.add_header("x-api-key", api_key)
-        req.add_header("anthropic-version", "2023-06-01")
-        req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status == 200:
-                typer.echo("  ✅ API key valid!")
-            else:
-                typer.echo(f"  ⚠️ API returned status {resp.status}")
-    except Exception as e:
-        typer.echo(f"  ⚠️ Could not validate: {e}")
+    if provider_type == "opencode-zen":
+        typer.echo("\n🔑 Step 1b/7 — OpenCode Zen API Key")
+        typer.echo("  Base URL: https://opencode.ai/zen  (uses minimax-m2.5-free by default)")
+        api_key = os.environ.get("OPENCODE_API_KEY", "")
+        if not api_key:
+            api_key = questionary.text(
+                "Enter your OpenCode API key:",
+                style=questionary.Style([("password", "bold")]),
+            ).ask()
+        if not api_key:
+            typer.echo("❌ API key required. Run 'nanobot-lite setup' again.")
+            return
 
-    # ── Step 2: Telegram ─────────────────────────────────────────────────────
-    typer.echo("\n📱 Step 2/6 — Telegram Bot")
+        # Validate
+        typer.echo("  Validating API key...")
+        try:
+            import urllib.request, json
+            req = urllib.request.Request(
+                "https://opencode.ai/zen/v1/models",
+                method="GET",
+            )
+            req.add_header("Authorization", f"Bearer {api_key}")
+            req.add_header("Accept", "application/json")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    typer.echo("  ✅ API key valid!")
+                else:
+                    typer.echo(f"  ⚠️ API returned status {resp.status}")
+        except Exception as e:
+            typer.echo(f"  ⚠️ Could not validate: {e}")
+    else:
+        typer.echo("\n🔑 Step 1b/7 — Anthropic API Key")
+        typer.echo("  Get yours at: https://console.anthropic.com/")
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            api_key = questionary.text(
+                "Enter your Anthropic API key (sk-ant-...):",
+                style=questionary.Style([("password", "bold")]),
+            ).ask()
+        if not api_key:
+            typer.echo("❌ API key required. Run 'nanobot-lite setup' again.")
+            return
+
+        # Validate API key
+        typer.echo("  Validating API key...")
+        try:
+            import urllib.request, json
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages",
+                data=json.dumps({"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"ping"}],"max_tokens":10}).encode(),
+                method="POST",
+            )
+            req.add_header("x-api-key", api_key)
+            req.add_header("anthropic-version", "2023-06-01")
+            req.add_header("Content-Type", "application/json")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    typer.echo("  ✅ API key valid!")
+                else:
+                    typer.echo(f"  ⚠️ API returned status {resp.status}")
+        except Exception as e:
+            typer.echo(f"  ⚠️ Could not validate: {e}")
+
+    # ── Step 3: Telegram ─────────────────────────────────────────────────────
+    typer.echo("\n📱 Step 3/7 — Telegram Bot")
     typer.echo("  1. Open Telegram → search @BotFather")
     typer.echo("  2. Send /newbot → follow the prompts")
     typer.echo("  3. Copy your bot token (e.g. 123456789:ABC...)")
@@ -281,30 +334,35 @@ def setup(
     except Exception as e:
         typer.echo(f"  ⚠️ Could not verify: {e}")
 
-    # Allowlist
-    typer.echo("\n🔐 Step 3/6 — Access Control")
+    # ── Step 4: Access Control
+    typer.echo("\n🔐 Step 4/7 — Access Control")
     allowlist = questionary.text(
         "Allowed user IDs (comma-separated, leave blank for open):",
         default="",
     ).ask()
     allowed_users = [u.strip() for u in allowlist.split(",") if u.strip()]
 
-    # ── Step 4: Agent config ─────────────────────────────────────────────────
-    typer.echo("\n🤖 Step 4/6 — Agent Configuration")
+    # ── Step 5: Agent config ─────────────────────────────────────────────────
+    typer.echo("\n🤖 Step 5/7 — Agent Configuration")
 
     agent_name = questionary.text(
         "Agent name (default: Nanobot-Lite):",
         default="Nanobot-Lite",
     ).ask() or "Nanobot-Lite"
 
+    model_choices = [
+        "claude-sonnet-4-20250514",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-haiku-20240307",
+    ] if provider_type == "anthropic" else [
+        "minimax-m2.5-free",
+        "minimax-01",
+    ]
+
     model = questionary.select(
         "Default model:",
-        choices=[
-            "claude-sonnet-4-20250514",
-            "claude-3-5-sonnet-20241022",
-            "claude-3-haiku-20240307",
-        ],
-        default="claude-sonnet-4-20250514",
+        choices=model_choices,
+        default=model_choices[0],
     ).ask()
 
     max_tokens = questionary.text(
@@ -319,8 +377,8 @@ def setup(
     ).ask()
     temperature = float(temp) if temp.replace(".", "").isdigit() else 0.7
 
-    # ── Step 5: Personality ─────────────────────────────────────────────────
-    typer.echo("\n🎭 Step 5/6 — Personality")
+    # ── Step 6: Personality ─────────────────────────────────────────────────
+    typer.echo("\n🎭 Step 6/7 — Personality")
 
     personalities = {
         "helpful": "A helpful, friendly assistant that explains things clearly.",
@@ -344,8 +402,8 @@ def setup(
     else:
         system_prompt = personalities[personality]
 
-    # ── Step 6: Workspace ───────────────────────────────────────────────────
-    typer.echo("\n📁 Step 6/6 — Workspace")
+    # ── Step 7: Workspace ───────────────────────────────────────────────────
+    typer.echo("\n📁 Step 7/7 — Workspace")
 
     workspace = questionary.text(
         "Workspace directory (default: ~/nanobot_workspace):",
@@ -364,7 +422,10 @@ def setup(
     config = Config(
         agent=AgentConfig(
             name=agent_name,
+            provider=provider_type,
             model=model,
+            base_url="https://opencode.ai/zen" if provider_type == "opencode-zen" else "",
+            api_key=api_key,
             max_tokens=max_tokens,
             temperature=temperature,
             system_prompt=system_prompt,
@@ -390,10 +451,10 @@ def setup(
 
     typer.echo(f"\n✅ Setup complete!")
     typer.echo(f"   Config saved: {cfg_path}")
+    typer.echo(f"\n   Provider: {provider_type} | Model: {model}")
     typer.echo(f"\n   Next steps:")
-    typer.echo(f"   1. Set API key: export ANTHROPIC_API_KEY={api_key[:15]}...")
-    typer.echo(f"   2. Start bot:   nanobot-lite run")
-    typer.echo(f"   3. Message your bot on Telegram!")
+    typer.echo(f"   1. Start bot:   nanobot-lite run")
+    typer.echo(f"   2. Message your bot on Telegram!")
 
 
 # ─── Session management ───────────────────────────────────────────────────────
