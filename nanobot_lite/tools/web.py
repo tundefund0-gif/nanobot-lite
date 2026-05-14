@@ -74,7 +74,7 @@ def create_web_tools() -> list[Tool]:
                 "Use this when you need current information or don't know something. "
                 "Best for factual queries, news, product reviews, etc."
             ),
-            parameters={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "query": {
@@ -98,7 +98,7 @@ def create_web_tools() -> list[Tool]:
                 "Returns the page's main content, stripped of navigation and ads. "
                 "Content is truncated at ~8000 characters."
             ),
-            parameters={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "url": {

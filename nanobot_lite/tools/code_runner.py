@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -122,20 +123,18 @@ class CodeRunner(Tool):
             "Supports multi-pass self-healing: if code fails, auto-fix and retry up to 5 times."
         )
 
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "The code to execute"},
-                "language": {
-                    "type": "string",
-                    "description": "Language: py, js, rb, php, sh, lua, c. Auto-detected if omitted."
-                },
-                "timeout": {"type": "integer", "description": "Max seconds (default 30)", "default": 30},
+    input_schema: dict[str, Any] = field(default_factory=lambda: {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string", "description": "The code to execute"},
+            "language": {
+                "type": "string",
+                "description": "Language: py, js, rb, php, sh, lua, c. Auto-detected if omitted.",
             },
-            "required": ["code"],
-        }
+            "timeout": {"type": "integer", "description": "Max seconds (default 30)", "default": 30},
+        },
+        "required": ["code"],
+    })
 
     async def execute(self, args: dict[str, Any]) -> ToolResult:
         code = args.get("code", "")

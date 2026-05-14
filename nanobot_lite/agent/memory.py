@@ -4,11 +4,20 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
+try:
+    from loguru import logger
+except ImportError:
+    import sys
+    class _DummyLogger:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): print(*a, file=sys.stderr)
+        def error(self, *a, **k): print(*a, file=sys.stderr)
+    logger = _DummyLogger()
 
 from nanobot_lite.providers.base import Message
 from nanobot_lite.utils.helpers import ensure_dir, estimate_tokens
@@ -19,7 +28,7 @@ class SessionMessage:
     """A single message in a session."""
     role: str
     content: str
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     tool_call_id: str | None = None
     tool_name: str | None = None
 
@@ -36,7 +45,7 @@ class SessionMessage:
         return cls(
             role=d["role"],
             content=d["content"],
-            timestamp=d.get("timestamp", datetime.utcnow().isoformat()),
+            timestamp=d.get("timestamp", datetime.now(timezone.utc).isoformat()),
             tool_call_id=d.get("tool_call_id"),
             tool_name=d.get("tool_name"),
         )
@@ -47,13 +56,13 @@ class Session:
     """A chat session with message history."""
     session_key: str
     messages: list[SessionMessage] = field(default_factory=list)
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     turn_count: int = 0
 
     def add_message(self, role: str, content: str, **kwargs) -> None:
         self.messages.append(SessionMessage(role=role, content=content, **kwargs))
-        self.updated_at = datetime.utcnow().isoformat()
+        self.updated_at = datetime.now(timezone.utc).isoformat()
         if role == "user":
             self.turn_count += 1
 
@@ -71,8 +80,8 @@ class Session:
         return cls(
             session_key=d["session_key"],
             messages=[SessionMessage.from_dict(m) for m in d.get("messages", [])],
-            created_at=d.get("created_at", datetime.utcnow().isoformat()),
-            updated_at=d.get("updated_at", datetime.utcnow().isoformat()),
+            created_at=d.get("created_at", datetime.now(timezone.utc).isoformat()),
+            updated_at=d.get("updated_at", datetime.now(timezone.utc).isoformat()),
             turn_count=d.get("turn_count", 0),
         )
 

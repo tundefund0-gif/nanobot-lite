@@ -13,7 +13,7 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot_lite.agent.healer import get_healer, ToolHealth
+from nanobot_lite.agent.healer import get_healer, ToolHealth, PerErrorCircuitBreaker
 
 
 # ─── Diagnostic sections ─────────────────────────────────────────────────────
@@ -53,23 +53,67 @@ class SelfDiagnostician:
 
     @staticmethod
     def _health() -> str:
+        from nanobot_lite.agent.healer import get_healer
         healer = get_healer()
-        return healer.health_report()
+        # Build a richer health report
+        lines = ["## 🏥 Tool Health\n"]
+        tools = list(healer.health._tools.values())
+        if not tools:
+            lines.append("(no health data yet)")
+            return "\n".join(lines)
+
+        for h in sorted(tools, key=lambda x: x.health_score):
+            age_ok = ""
+            if h.last_success:
+                secs = int(time.time() - h.last_success)
+                age_ok = f" | last OK {secs}s ago"
+            age_fail = ""
+            if h.last_failure:
+                secs = int(time.time() - h.last_failure)
+                age_fail = f" | last fail {secs}s ago"
+            top = h.top_errors(3)
+            err_str = ""
+            if top:
+                err_str = "\n  Top errors: " + ", ".join(f"{e}({c})" for e, c in top)
+            lines.append(
+                f"{h.status} **{h.name}**\n"
+                f"  score={h.health_score:.2f} | "
+                f"calls={h.total_calls} | fails={h.failures} | "
+                f"healed={h.heals_success}/{h.heals_failed} | "
+                f"avg_passes={h.avg_heal_passes:.1f}"
+                f"{age_ok}{age_fail}{err_str}"
+            )
+        return "\n".join(lines)
 
     @staticmethod
     def _circuits() -> str:
         healer = get_healer()
-        report = healer.circuit_report()
+        report = healer.circuit_breaker.report()
 
         lines = []
-        for tool, state in sorted(report.items()):
-            status = "🔴 OPEN" if state["open"] else ("🟡 HALF-OPEN" if state["half_open"] else "🟢 CLOSED")
-            lines.append(
-                f"**{tool}**: {status} — "
-                f"failures={state['failures']}, "
-                f"last={state['last_failure'] or 'never'}"
-            )
-        return "\n".join(lines) if lines else "🟢 All circuits closed — no tool failures detected."
+        for tool, et_map in sorted(report.items()):
+            lines.append(f"### `{tool}`")
+            for et, state in sorted(et_map.items()):
+                open_ = state.get("open", False)
+                status = "🔴 OPEN" if open_ else "🟢 CLOSED"
+                failures = state.get("failures", 0)
+                last = state.get("last_failure")
+                age = ""
+                if last:
+                    try:
+                        dt = datetime.fromisoformat(last)
+                        secs_ago = int(time.time() - dt.timestamp())
+                        age = f" ({secs_ago}s ago)"
+                    except Exception:
+                        age = f" ({last})"
+                et_label = et if et != "_global_" else "all errors"
+                lines.append(
+                    f"  {status} **{et_label}** — "
+                    f"failures={failures}{age}"
+                )
+        return "\n".join(lines) if lines else (
+            "🟢 All circuits closed — no tool failures detected."
+        )
 
     @staticmethod
     def _memory() -> str:
@@ -156,13 +200,17 @@ class SelfDiagnostician:
         try:
             from nanobot_lite.tools.base import get_registry
             registry = get_registry()
-            workspace = registry.get_context("workspace", "unknown")
+            workspace = registry.get_context("workspace", os.getcwd())
             restrict = registry.get_context("restrict_to_workspace", True)
         except Exception:
             workspace = os.getcwd()
             restrict = True
 
-        lines = [f"Path: `{workspace}`", f"Restricted: {restrict}"]
+        lines = [
+            f"**Root:** `{workspace}`",
+            f"**Restricted:** {restrict}",
+            f"**Absolute:** `{Path(workspace).resolve()}`",
+        ]
 
         wp = Path(workspace) if workspace != "unknown" else None
         if wp and wp.exists():
@@ -170,11 +218,61 @@ class SelfDiagnostician:
                 all_files = list(wp.rglob("*"))
                 dirs = [f for f in all_files if f.is_dir()]
                 files = [f for f in all_files if f.is_file()]
-                lines.append(f"Contents: {len(files)} file(s), {len(dirs)} dir(s)")
+                lines.append(f"**Contents:** {len(files)} file(s), {len(dirs)} dir(s)")
+
+                # Python files
+                py_files = [f for f in files if f.suffix == ".py"]
+                lines.append(f"**Python files:** {len(py_files)}")
+
+                # Config files
+                config_files = [
+                    f for f in files
+                    if f.suffix in (".yaml", ".yml", ".toml", ".json", ".env")
+                    or f.name.startswith(".env")
+                ]
+                if config_files:
+                    lines.append(f"**Config files:** {len(config_files)}")
+                    for cf in config_files[:5]:
+                        lines.append(f"  - `{cf.relative_to(wp)}`")
+
+                # Git status
+                git_dir = wp / ".git"
+                if git_dir.exists():
+                    lines.append(f"**Git:** ✅ initialized")
+                else:
+                    lines.append(f"**Git:** ❌ not initialized")
             except PermissionError:
-                lines.append("(permission denied to enumerate)")
+                lines.append("_(permission denied to enumerate)_")
         else:
             lines.append("⚠️ Workspace does not exist!")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _environment() -> str:
+        lines = ["## 🌐 Environment\n"]
+
+        # Key env vars
+        key_vars = [
+            "PYTHONPATH", "HOME", "USER", "PATH", "LANG",
+            "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY",
+            "TELEGRAM_BOT_TOKEN", "TG_API_ID", "TG_API_HASH",
+        ]
+        for var in key_vars:
+            val = os.environ.get(var, "")
+            if val:
+                if any(s in var for s in ("KEY", "TOKEN", "HASH", "SECRET")):
+                    val = val[:6] + "***" if len(val) > 6 else "***"
+                lines.append(f"**{var}:** `{val}`")
+            else:
+                lines.append(f"**{var}:** _(not set)_")
+
+        # Config file
+        config_path = Path.home() / ".nanobot_lite" / "config.yaml"
+        if config_path.exists():
+            lines.append(f"\n**Config:** ✅ `{config_path}`")
+        else:
+            lines.append(f"\n**Config:** ❌ not found")
 
         return "\n".join(lines)
 
@@ -241,13 +339,14 @@ async def run_diagnostics(section: str | None = None) -> str:
     d = SelfDiagnostician()
     if section and section != "all":
         section_map = {
-            "health":    d._health,
-            "circuits":  d._circuits,
-            "memory":    d._memory,
-            "system":    d._system,
-            "workspace": d._workspace,
-            "runtime":   d._runtime,
-            "rollbacks": d._rollbacks,
+            "health":     d._health,
+            "circuits":   d._circuits,
+            "memory":     d._memory,
+            "system":     d._system,
+            "workspace":  d._workspace,
+            "runtime":    d._runtime,
+            "rollbacks":  d._rollbacks,
+            "env":        d._environment,
         }
         fn = section_map.get(section)
         result = fn() if fn else "Unknown section"

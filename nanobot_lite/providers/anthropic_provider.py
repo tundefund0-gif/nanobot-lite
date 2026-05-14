@@ -7,7 +7,16 @@ import urllib.request
 import urllib.error
 from typing import Any, AsyncIterator
 
-from loguru import logger
+try:
+    from loguru import logger
+except ImportError:
+    import sys as _sys
+    class _Dummy:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): print(*a, file=_sys.stderr)
+        def error(self, *a, **k): print(*a, file=_sys.stderr)
+    logger = _Dummy()
 
 from nanobot_lite.providers.base import (
     LLMProvider,

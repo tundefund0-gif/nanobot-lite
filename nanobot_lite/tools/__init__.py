@@ -1,1 +1,1 @@
-"""Tools module."""
+"""Tools module — all Nanobot-Lite tools."""

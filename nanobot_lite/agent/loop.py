@@ -10,7 +10,7 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot_lite.agent.healer import get_healer, Severity, Strategy
+from nanobot_lite.agent.healer import get_healer, Severity, Strategy, PerErrorCircuitBreaker
 from nanobot_lite.agent.memory import ContextBuilder, Session, SessionStore
 from nanobot_lite.agent.self_diagnosis import run_diagnostics
 from nanobot_lite.bus.events import (
@@ -325,9 +325,11 @@ class AgentLoop:
         Strategy per pass:
           1. Try original args
           2. AST auto-fix (Python errors)
-          3. Try fallback tool
+          3. Fallback tool / environment recovery
           4. Path recovery (FileNotFoundError)
-          5. LLM-guided fix
+          5. Incremental code fix
+          6. Retry with exponential backoff
+          7. LLM-guided fix (last resort)
         """
         tool_name = tool_call.name
         args = tool_call.arguments or {}
@@ -338,24 +340,30 @@ class AgentLoop:
         current_args = dict(args)
         current_code = args.get("code", "") if tool_name == "run_code" else ""
         heal_passes = 0
+        current_tool = tool_name  # may change if we fall back
+        current_error_type = ""
 
         for pass_num in range(1, self.healer.MAX_HEAL_PASSES + 1):
             heal_passes = pass_num
 
             # ── Execute ─────────────────────────────────────────────────────────
             await self.bus.inbound.put(ToolCallEvent(
-                tool_name=tool_name,
+                tool_name=current_tool,
                 arguments=current_args,
                 user_id=session.user_id,
                 chat_id=session.chat_id,
             ))
 
             try:
-                result = await self.tools.execute(tool_name, current_args)
+                result = await self.tools.execute(current_tool, current_args)
             except Exception as e:
-                logger.error(f"[heal] exception in {tool_name}: {e}")
+                logger.error(f"[heal] exception in {current_tool}: {e}")
                 plan = self.healer.diagnose(str(e))
-                self.healer.record_tool_result(tool_name, success=False, fatal=(plan.severity == Severity.FATAL))
+                current_error_type = self.healer._error_type_cache.get(str(e), "Exception")
+                self.healer.record_tool_result(
+                    current_tool, success=False, fatal=(plan.severity == Severity.FATAL),
+                    error_type=current_error_type
+                )
                 result = ToolResult(
                     content=f"Exception: {e}\n\n🔧 {plan.diagnosis}",
                     success=False,
@@ -363,32 +371,41 @@ class AgentLoop:
                 )
 
             await self.bus.inbound.put(ToolResultEvent(
-                tool_name=tool_name,
+                tool_name=current_tool,
                 result=result.content,
                 success=result.success,
             ))
 
             if result.success:
-                self.healer.record_tool_result(tool_name, success=True, heal_passes=pass_num - 1)
+                self.healer.record_tool_result(
+                    current_tool, success=True, heal_passes=pass_num - 1,
+                    error_type=current_error_type
+                )
                 return result, pass_num - 1
 
-            # Failure — record
+            # Failure — diagnose and record
             plan = self.healer.diagnose(result.content)
+            current_error_type = self.healer._error_type_cache.get(result.content, "UnknownError")
             error_history.append(result.content[:300])
 
             if pass_num < self.healer.MAX_HEAL_PASSES:
-                logger.info(f"[heal] pass {pass_num}/{self.healer.MAX_HEAL_PASSES} failed for {tool_name}, "
-                           f"strategy={plan.strategy.name}")
+                logger.info(
+                    f"[heal] pass {pass_num}/{self.healer.MAX_HEAL_PASSES} failed for "
+                    f"{current_tool} ({current_error_type}), strategy={plan.strategy.name}"
+                )
 
             # ── Healing strategies ───────────────────────────────────────────────
 
             fixed = False
 
-            # Strategy 1: AST auto-fix for Python
-            if (tool_name == "run_code" and
-                plan.strategy in (Strategy.PATCH_CODE, Strategy.RETRY_PARAMS) and
+            # Strategy 1: AST auto-fix for Python (incremental minimal fix first)
+            if (current_tool == "run_code" and
+                plan.strategy in (Strategy.PATCH_CODE, Strategy.RETRY_PARAMS,
+                                  Strategy.INCREMENTAL_FIX) and
                 current_code):
-                fixed_code, fix_reason = self.healer.auto_fix_code(current_code, result.content)
+                fixed_code, fix_reason = self.healer.auto_fix_code(
+                    current_code, result.content
+                )
                 if fixed_code and fixed_code != current_code:
                     current_code = fixed_code
                     current_args["code"] = fixed_code
@@ -398,17 +415,30 @@ class AgentLoop:
 
             # Strategy 2: Fallback tool
             if not fixed and plan.strategy == Strategy.FALLBACK_TOOL:
-                fallback = self.healer.get_fallback_tool(tool_name)
+                fallback = self.healer.get_fallback_tool(current_tool)
                 if fallback:
-                    logger.info(f"[heal] trying fallback {fallback} → {tool_name}")
-                    old_tool = tool_name
-                    tool_name = fallback
-                    # Adjust args for fallback
+                    logger.info(f"[heal] fallback {current_tool} → {fallback}")
+                    old_tool = current_tool
+                    current_tool = fallback
                     if fallback == "python":
                         current_args = {"code": args.get("command", ""), "language": "bash"}
                     fixed = True
 
-            # Strategy 3: Alternative paths
+            # Strategy 3: Environment recovery (PATH, PYTHONPATH, etc.)
+            if not fixed and plan.strategy == Strategy.ENVIRONMENT_RECOVERY:
+                suggestions = self.healer.path_finder.suggest_env_fixes(result.content)
+                if suggestions:
+                    plan.fix_hints.extend(suggestions)
+                    # Try to fix common env issues
+                    if "PYTHONPATH" in result.content:
+                        import os
+                        import sys
+                        # Try to add current dir to sys.path
+                        sys.path.insert(0, os.getcwd())
+                        logger.info("[heal] added cwd to sys.path")
+                        fixed = True
+
+            # Strategy 4: Alternative paths (FileNotFoundError)
             if not fixed and plan.strategy == Strategy.ALT_PATH:
                 path_m = re.search(r"['\"]([^'\"]+)['\"]", result.content)
                 if path_m:
@@ -419,30 +449,43 @@ class AgentLoop:
                     )
                     if similar:
                         logger.info(f"[heal] path recovery: {similar}")
-                        # Inject alternative path
                         if "path" in current_args:
                             current_args["path"] = similar[0]
                         fixed = True
 
-            # Strategy 4: LLM-guided healing (last resort before max passes)
+            # Strategy 5: Retry with backoff (network/timeout)
+            if not fixed and plan.strategy == Strategy.RETRY_BACKOFF:
+                delay = plan.retry_delay * (2 ** (pass_num - 1)) if plan.retry_delay else min(
+                    2 ** pass_num, 30
+                )
+                logger.info(f"[heal] retry_backoff for {current_tool}, "
+                           f"waiting {delay:.1f}s...")
+                await asyncio.sleep(delay)
+                fixed = True
+
+            # Strategy 6: Generic retry
+            if not fixed and plan.strategy == Strategy.RETRY:
+                logger.info(f"[heal] retry for {current_tool}")
+                await asyncio.sleep(min(2 ** pass_num, 10))
+                fixed = True
+
+            # Strategy 7: LLM-guided healing (last two passes)
             if (not fixed and
                 (plan.escalate_to_llm or plan.severity >= Severity.HIGH) and
-                pass_num == self.healer.MAX_HEAL_PASSES - 1):
+                pass_num >= self.healer.MAX_HEAL_PASSES - 1):
                 llm_prompt = self.healer.build_llm_fix_prompt(
-                    tool_name=tool_name,
+                    tool_name=current_tool,
                     args=current_args,
                     error_text=result.content,
                     code=current_code,
                     previous_attempts=error_history,
                 )
-                # Ask LLM for a fix
                 llm_response = await self._call_llm_with_retry(
                     [LLMMessage(role="user", content=llm_prompt)],
                     tools=None,
                 )
                 suggested_fix = strip_think(llm_response.content)
-                if suggested_fix and len(suggested_fix) < 2000:
-                    # Extract code from response if present
+                if suggested_fix and len(suggested_fix) < 3000:
                     code_m = re.search(r"```(?:python)?\n(.*?)```", suggested_fix, re.S)
                     if code_m:
                         current_code = code_m.group(1).strip()
@@ -451,18 +494,14 @@ class AgentLoop:
                         logger.info("[heal] LLM-guided fix injected")
                         fixed = True
 
-            # Strategy 5: Retry with same params (for network/timeout)
-            if not fixed and plan.strategy == Strategy.RETRY:
-                logger.info(f"[heal] retry strategy for {tool_name}, waiting...")
-                await asyncio.sleep(min(2 ** pass_num, 10))
-                fixed = True
-
             if not fixed:
-                # No more strategies — stop healing
                 break
 
         # All healing passes exhausted
-        self.healer.record_tool_result(tool_name, success=False, heal_passes=heal_passes)
+        self.healer.record_tool_result(
+            current_tool, success=False, heal_passes=heal_passes,
+            error_type=current_error_type
+        )
         final_plan = self.healer.diagnose(error_history[-1] if error_history else "unknown")
         return ToolResult(
             content=(
@@ -470,7 +509,7 @@ class AgentLoop:
                 f"🔧 *Diagnosis:* {final_plan.diagnosis}\n"
                 f"📋 *Fix hints:*\n" +
                 "\n".join(f"  • {h}" for h in final_plan.fix_hints) +
-                f"\n_Healed {heal_passes} time(s) — max passes reached._"
+                f"\n_Errors: {current_error_type} | Healed {heal_passes}x — max passes reached._"
             ),
             success=False,
             error=result.error or "",
