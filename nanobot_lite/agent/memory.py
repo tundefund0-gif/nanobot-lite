@@ -11,13 +11,14 @@ from typing import Any
 try:
     from loguru import logger
 except ImportError:
-    import sys
-    class _DummyLogger:
+    import sys as _sys
+    class _Dummy:
         def debug(self, *a, **k): pass
         def info(self, *a, **k): pass
-        def warning(self, *a, **k): print(*a, file=sys.stderr)
-        def error(self, *a, **k): print(*a, file=sys.stderr)
-    logger = _DummyLogger()
+        def warning(self, *a, **k): print(*a, file=_sys.stderr)
+        def error(self, *a, **k): print(*a, file=_sys.stderr)
+        def success(self, *a, **k): pass
+    logger = _Dummy()
 
 from nanobot_lite.providers.base import Message
 from nanobot_lite.utils.helpers import ensure_dir, estimate_tokens
@@ -65,6 +66,18 @@ class Session:
         self.updated_at = datetime.now(timezone.utc).isoformat()
         if role == "user":
             self.turn_count += 1
+
+    def compress(self) -> None:
+        """Trim oldest messages to stay within memory budget (~50 messages)."""
+        MAX_MESSAGES = 50
+        if len(self.messages) <= MAX_MESSAGES:
+            return
+        self.messages = self.messages[-MAX_MESSAGES:]
+        logger.info(f"Session compressed to {MAX_MESSAGES} messages")
+
+    def mark_updated(self) -> None:
+        """Update the updated_at timestamp."""
+        self.updated_at = datetime.now(timezone.utc).isoformat()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +150,14 @@ class SessionStore:
             if tmp_path.exists():
                 tmp_path.unlink()
             raise
+
+    def get_or_create(self, platform: str, user_id: str, chat_id: str) -> Session:
+        """Load existing session or create a new one for this user/chat."""
+        session_key = f"{platform}:{user_id}:{chat_id}"
+        session = self.load(session_key)
+        if session is not None:
+            return session
+        return Session(session_key=session_key)
 
     def delete(self, session_key: str) -> bool:
         """Delete a session."""
