@@ -136,27 +136,40 @@ async def run_shell_async(
 
 def web_search(query: str, num_results: int = 5) -> list[dict[str, str]]:
     """
-    Perform a web search using DuckDuckGo.
-
-    Returns list of dicts with 'title', 'url', 'snippet'.
+    Perform a web search using DuckDuckGo HTML (pure stdlib — no native deps).
     """
+    import urllib.parse, urllib.request, urllib.error, re
+
     try:
-        from ddgs import DDGS
-        results = []
-        with DDGS() as ddgs:
-            for i, r in enumerate(ddgs.text(query, max_results=num_results)):
-                if i >= num_results:
-                    break
-                results.append({
-                    "title": r.get("title", ""),
-                    "url": r.get("href", ""),
-                    "snippet": r.get("body", ""),
-                })
-        return results
-    except ImportError:
-        return [{"error": "ddgs not installed"}]
+        encoded_q = urllib.parse.quote(query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded_q}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
-        return [{"error": str(e)}]
+        return [{"error": f"Failed to reach DuckDuckGo: {e}"}]
+
+    results = []
+    # DuckDuckGo HTML results: <a class="result__a" href="...">Title</a>
+    # and <a class="result__snippet" href="...">Snippet</a>
+    # Pattern: find all result links
+    link_pattern = re.compile(r'<a class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.S)
+    # Snippets come after the title links
+    snippet_pattern = re.compile(r'<a class="result__snippet"[^>]*>(.*?)</a>', re.S)
+
+    titles = link_pattern.findall(html)
+    snippets = snippet_pattern.findall(html)
+
+    for i, (url, title_raw) in enumerate(titles[:num_results]):
+        # Strip HTML tags from title
+        title = re.sub(r'<[^>]+>', '', title_raw).strip()
+        snippet = re.sub(r'<[^>]+>', '', snippets[i]) if i < len(snippets) else ""
+        if title and url.startswith("http"):
+            results.append({"title": title, "url": url, "snippet": snippet.strip()})
+
+    if not results:
+        return [{"error": "No results found"}]
+    return results
 
 
 def fetch_url(url: str, timeout: int = 10) -> str:
