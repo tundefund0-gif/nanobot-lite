@@ -38,6 +38,7 @@ from nanobot_lite.tools.shell import create_shell_tool
 from nanobot_lite.tools.filesystem import create_filesystem_tools
 from nanobot_lite.tools.web import create_web_tools
 from nanobot_lite.tools.advanced import create_advanced_tools
+from nanobot_lite.tools.code_runner import CodeRunner as create_code_runner
 
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
@@ -131,6 +132,7 @@ def run(
             registry.register(tool)
         for tool in create_advanced_tools():
             registry.register(tool)
+        registry.register(create_code_runner())
 
         # Ensure workspace exists
         config.tools.workspace_dir.mkdir(parents=True, exist_ok=True)
