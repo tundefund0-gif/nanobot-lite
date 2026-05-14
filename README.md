@@ -1,4 +1,4 @@
-# 🤖 Nanobot-Lite v0.2.0
+# 🤖 Nanobot-Lite v0.6.0
 
 > **Advanced AI agent for Telegram — runs natively on Termux 32-bit Android**
 
@@ -6,34 +6,78 @@ Built from scratch for constrained hardware. Pure Python, zero native deps.
 
 ---
 
-## ✨ What's New in v0.2.0
+## ✨ What's New in v0.6.0
 
-- **12 slash commands** — `/help`, `/search`, `/shell`, `/stats`, `/sessions`, `/clear`, `/export`, `/uptime`, `/sysinfo`, `/id`, `/menu`, `/ping`, `/version`, `/config`
+- **curl | bash bootstrap** — no pip required to install. Works on a fresh Termux.
+- **Deep self-healing engine** — 5-pass iterative error recovery (80+ patterns, AST auto-fix, LLM-guided healing, per-error-type circuit breakers)
+- **10 async timeout guards** — agent loop, LLM calls, Telegram send all protected from hangs
+- **Lazy loguru fallback** — 11 modules work without loguru installed
+- **Per-error circuit breaker** — tracks `(tool × error_type)` pairs, not just per-tool
+- **HealthMonitor** — disk-persisted, survives restarts
+- **RollbackManager** — rolling backups, auto-restore on failure
+- **7 self-diagnostic sections** — health, circuits, memory, system, workspace, runtime, env
+- **13 slash commands** — `/help`, `/search`, `/shell`, `/stats`, `/sessions`, `/clear`, `/export`, `/uptime`, `/sysinfo`, `/id`, `/menu`, `/ping`, `/version`, `/config`, `/health`, `/stop`, `/exec`
 - **9 advanced tools** — Calculator, System Info, Date/Time, URL Fetcher, Encode/Decode, UUID Generator, Currency Converter, Text Stats, File Hash
-- **Rate limiting** — Token bucket per user (20 msgs/min, 50 turns/hr)
 - **Context compression** — Automatically compacts long conversations
 - **Retry with backoff** — LLM calls retry 3x with exponential backoff
 - **Multi-tool chaining** — Execute multiple tools per turn
-- **Inline keyboard menus** — Rich interactive UI
+- **Rate limiting** — Token bucket per user (20 msgs/min, 50 turns/hr)
 - **User allowlisting** — Restrict access by Telegram user ID
-- **Interactive setup wizard** — 6-step guided config with API validation
-- **Personality builder** — Customize agent behavior and expertise
+- **Interactive setup wizard** — 7-step guided config with API validation
 - **Session export** — Export chat history to text file
-- **Health check** — `nanobot-lite health` verifies all systems
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Install (curl — no pip needed)
 
 ```bash
-# Install (one line)
-pip install git+https://github.com/tundefund0-gif/nanobot-lite.git
+# One line. Works on fresh Termux, Linux, macOS.
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/tundefund0-gif/nanobot-lite/main/install.sh)"
+```
 
-# Setup (interactive wizard)
-nanobot-lite setup
+Or download and run manually:
 
-# Run
+```bash
+curl -fsSL https://raw.githubusercontent.com/tundefund0-gif/nanobot-lite/main/install.sh -o install.sh
+chmod +x install.sh
+./install.sh
+```
+
+**What it does:**
+1. Detects platform (Termux / macOS / Linux)
+2. Installs Python + pip if missing (via `pkg` on Termux, `brew` on macOS, `apt` on Linux)
+3. Creates an isolated virtual environment at `~/nanobot_env`
+4. Clones / updates the repo to `~/nanobot-lite`
+5. Installs all Python dependencies
+6. Runs the interactive setup wizard
+7. Adds a `nanobot` alias to your shell
+
+---
+
+## 🔄 Upgrade
+
+```bash
+# Pull latest and reinstall
+cd ~/nanobot-lite && git pull origin main
+~/nanobot_env/bin/pip install -e . --quiet
+
+# Or run the bootstrap again (safe — detects existing install)
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/tundefund0-gif/nanobot-lite/main/install.sh)"
+```
+
+---
+
+## 🏃 Run
+
+```bash
+# Activate the alias (if not yet in session)
+source ~/.bashrc
+
+# Start the bot
 nanobot-lite run
+
+# Or directly
+~/nanobot_env/bin/python -m nanobot_lite run
 ```
 
 ---
