@@ -118,13 +118,21 @@ setup_venv() {
         success "Reusing existing venv"
     fi
 
-    # Bootstrap pip inside venv if missing
+    # Bootstrap pip inside venv using ensurepip (no curl needed — Python stdlib)
     PIP="$VENV_DIR/bin/pip"
     if [ ! -f "$PIP" ]; then
-        info "Installing pip inside venv..."
-        curl -sS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
-        "$VENV_DIR/bin/python" /tmp/get-pip.py --quiet
-        rm -f /tmp/get-pip.py
+        info "Bootstrapping pip inside venv (using ensurepip)..."
+        "$VENV_DIR/bin/python" -m ensurepip --upgrade 2>/dev/null || {
+            # Fallback: use get-pip.py via wget instead of curl
+            if command -v wget &>/dev/null; then
+                wget -q https://bootstrap.pypa.io/get-pip.py -O /tmp/get-pip.py 2>/dev/null && \
+                    "$VENV_DIR/bin/python" /tmp/get-pip.py --quiet && rm -f /tmp/get-pip.py
+            else
+                info "Installing pip via pkg..."
+                pkg install -y python-pip 2>/dev/null || true
+            fi
+        }
+        [ -f "$PIP" ] && success "pip bootstrapped inside venv" || warn "pip bootstrap skipped — using venv python directly"
     fi
 
     # Upgrade pip in venv
