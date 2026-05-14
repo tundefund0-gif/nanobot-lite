@@ -10,7 +10,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
+try:
+    from loguru import logger
+except ImportError:
+    import sys as _sys
+    class _Dummy:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): print(*a, file=_sys.stderr)
+        def error(self, *a, **k): print(*a, file=_sys.stderr)
+        def success(self, *a, **k): pass
+    logger = _Dummy()
 
 from nanobot_lite.agent.healer import get_healer, PathAutoDiscover, Strategy, Severity
 from nanobot_lite.tools.base import Tool, ToolResult

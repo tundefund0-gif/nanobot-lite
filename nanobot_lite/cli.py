@@ -13,7 +13,17 @@ from typing import Optional
 
 import questionary
 import typer
-from loguru import logger
+try:
+    from loguru import logger
+except ImportError:
+    import sys as _sys
+    class _Dummy:
+        def debug(self, *a, **k): pass
+        def info(self, *a, **k): pass
+        def warning(self, *a, **k): print(*a, file=_sys.stderr)
+        def error(self, *a, **k): print(*a, file=_sys.stderr)
+        def success(self, *a, **k): pass
+    logger = _Dummy()
 
 from nanobot_lite import __logo__, __version__
 from nanobot_lite.agent.loop import AgentLoop, RateLimiter, StreamConfig
@@ -254,21 +264,32 @@ def setup(
             typer.echo("❌ API key required. Run 'nanobot-lite setup' again.")
             return
 
-        # Validate
+        # Validate with a lightweight chat completions test (models endpoint may be restricted)
         typer.echo("  Validating API key...")
         try:
             import urllib.request, json
             req = urllib.request.Request(
-                "https://opencode.ai/zen/v1/models",
-                method="GET",
+                "https://opencode.ai/zen/v1/chat/completions",
+                data=json.dumps({"model": "minimax-m2.5-free", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}).encode(),
+                method="POST",
             )
             req.add_header("Authorization", f"Bearer {api_key}")
-            req.add_header("Accept", "application/json")
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            req.add_header("Content-Type", "application/json")
+            req.add_header("anthropic-version", "2023-06-01")
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 if resp.status == 200:
                     typer.echo("  ✅ API key valid!")
                 else:
                     typer.echo(f"  ⚠️ API returned status {resp.status}")
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")
+            # 401 = bad key, 403 = forbidden (key works but endpoint restricted), 429 = rate limit
+            if e.code == 401:
+                typer.echo("  ❌ Invalid API key!")
+            elif e.code == 403:
+                typer.echo("  ⚠️ Could not validate (403 Forbidden — key may work, proceeding anyway)")
+            else:
+                typer.echo(f"  ⚠️ API error {e.code}: {err_body[:100]}")
         except Exception as e:
             typer.echo(f"  ⚠️ Could not validate: {e}")
     else:
