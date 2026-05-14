@@ -514,25 +514,38 @@ async def handle_outbound(bus: MessageBus, config: Config) -> None:
 
     while True:
         try:
-            outbound = await bus.outbound.get()
+            outbound = await asyncio.wait_for(bus.outbound.get(), timeout=30.0)
 
             if isinstance(outbound, OutboundMessage):
                 if outbound.action == "typing":
                     try:
-                        await bot.send_chat_action(chat_id=outbound.chat_id, action="typing")
-                    except:
+                        await asyncio.wait_for(
+                            bot.send_chat_action(chat_id=outbound.chat_id, action="typing"),
+                            timeout=10.0,
+                        )
+                    except asyncio.TimeoutError:
+                        pass  # silently ignore typing indicator timeouts
+                    except Exception:
                         pass
                 elif outbound.text:
                     try:
-                        await bot.send_message(
-                            chat_id=outbound.chat_id,
-                            text=outbound.text[:4096],
-                            parse_mode=ParseMode.MARKDOWN,
-                            reply_to_message_id=int(outbound.reply_to) if outbound.reply_to else None,
+                        await asyncio.wait_for(
+                            bot.send_message(
+                                chat_id=outbound.chat_id,
+                                text=outbound.text[:4096],
+                                parse_mode=ParseMode.MARKDOWN,
+                                reply_to_message_id=int(outbound.reply_to) if outbound.reply_to else None,
+                            ),
+                            timeout=30.0,
                         )
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Telegram send timed out after 30s for chat {outbound.chat_id}")
                     except Exception as e:
-                        logger.error(f"Send error: {e}")
+                        logger.warning(f"Telegram send error: {e}")
 
+        except asyncio.TimeoutError:
+            # No messages in 30s — loop continues
+            continue
         except asyncio.CancelledError:
             break
         except Exception as e:

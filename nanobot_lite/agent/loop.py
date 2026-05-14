@@ -179,10 +179,12 @@ class AgentLoop:
 
         while self._running:
             try:
-                event = await self.bus.inbound.get()
+                event = await asyncio.wait_for(self.bus.inbound.get(), timeout=60.0)
                 if not isinstance(event, InboundMessage):
                     continue
                 await self._handle_message(event)
+            except asyncio.TimeoutError:
+                continue  # no messages, loop continues
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -535,13 +537,21 @@ class AgentLoop:
 
         for attempt in range(retries):
             try:
-                return await self.provider.chat(
-                    messages=messages,
-                    tools=tools,
-                    model=self.config.agent.model,
-                    max_tokens=self.config.agent.max_tokens,
-                    temperature=self.config.agent.temperature,
+                return await asyncio.wait_for(
+                    self.provider.chat(
+                        messages=messages,
+                        tools=tools,
+                        model=self.config.agent.model,
+                        max_tokens=self.config.agent.max_tokens,
+                        temperature=self.config.agent.temperature,
+                    ),
+                    timeout=90.0,
                 )
+            except asyncio.TimeoutError:
+                last_error = f"LLM call timed out after 90s (attempt {attempt+1}/{retries})"
+                logger.warning(last_error)
+                if attempt < retries - 1:
+                    await asyncio.sleep(2 ** attempt)
             except Exception as e:
                 last_error = str(e)
                 wait = 2 ** attempt
